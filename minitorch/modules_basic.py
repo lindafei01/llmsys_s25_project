@@ -34,7 +34,13 @@ class Embedding(Module):
         self.embedding_dim  = embedding_dim  # Embedding Dimension
         
         # COPY FROM ASSIGN2_3
-        raise NotImplementedError
+        # raise NotImplementedError
+        self.weights = Parameter(
+            tensor_from_numpy(
+                np.random.normal(0, 1, (num_embeddings, embedding_dim)).astype(np.float32),
+                backend=backend
+            )
+        )
     
     def forward(self, x: Tensor):
         """Maps word indices to one-hot vectors, and projects to embedding vectors.
@@ -48,7 +54,11 @@ class Embedding(Module):
         bs, seq_len = x.shape
         
         # COPY FROM ASSIGN2_3
-        raise NotImplementedError
+        # raise NotImplementedError
+        x_one_hot = one_hot(x, self.num_embeddings)
+        x_flat = x_one_hot.view(bs * seq_len, self.num_embeddings)
+        out_flat = x_flat @ self.weights.value
+        return out_flat.view(bs, seq_len, self.embedding_dim)
 
     
 class Dropout(Module):
@@ -71,7 +81,13 @@ class Dropout(Module):
             output : Tensor of shape (*)
         """
         # COPY FROM ASSIGN2_3
-        raise NotImplementedError
+        # raise NotImplementedError
+        if self.p_dropout == 0.0 or not self.training:
+            return x
+        
+        mask = tensor_from_numpy(np.random.binomial(1, 1 - self.p_dropout, x.shape).astype(np.float32), 
+                                 backend=x.backend)
+        return x * mask / (1 - self.p_dropout)
 
 
 class Linear(Module):
@@ -91,7 +107,15 @@ class Linear(Module):
         self.out_size = out_size
         
         # COPY FROM ASSIGN2_3
-        raise NotImplementedError
+        # raise NotImplementedError
+        self.in_size = in_size
+        self.has_bias = bias
+        bound = 1.0 / np.sqrt(in_size)
+
+        self.weights = Parameter(rand((in_size, out_size), backend=backend) * (2 * bound) - bound)
+
+        if self.has_bias:
+            self.bias = Parameter(rand((out_size,), backend=backend) * (2 * bound) - bound)
 
     def forward(self, x: Tensor):
         """Applies a linear transformation to the incoming data.
@@ -102,10 +126,28 @@ class Linear(Module):
         Returns:
             output : Tensor of shape (n, out_size)
         """
-        batch, in_size = x.shape
+        # batch, in_size = x.shape
         
         # COPY FROM ASSIGN2_3
-        raise NotImplementedError
+        # raise NotImplementedError
+        orig_shape = x.shape
+        if len(orig_shape) == 3:
+            batch_size, seq_len, _ = orig_shape
+            # 重塑为2D进行矩阵乘法
+            x = x.view(batch_size * seq_len, self.in_size)
+        
+        # 执行矩阵乘法
+        out = x @ self.weights.value
+        
+        # 添加偏置（如果有）
+        if self.has_bias:
+            out = out + self.bias.value
+            
+        # 如果输入是3D，恢复原始形状
+        if len(orig_shape) == 3:
+            out = out.view(batch_size, seq_len, self.out_size)
+            
+        return out
 
 
 class LayerNorm1d(Module):
@@ -125,7 +167,9 @@ class LayerNorm1d(Module):
         self.eps = eps
         
         # COPY FROM ASSIGN2_3
-        raise NotImplementedError
+        # raise NotImplementedError
+        self.weights = Parameter(ones((dim,), backend=backend))
+        self.bias = Parameter(zeros((dim,), backend=backend))
 
     def forward(self, x: Tensor) -> Tensor:
         """Applies Layer Normalization over a mini-batch of inputs. 
@@ -138,7 +182,31 @@ class LayerNorm1d(Module):
         Output: 
             output - Tensor of shape (bs, dim)
         """
-        batch, dim = x.shape
+        # batch, dim = x.shape
         
         # COPY FROM ASSIGN2_3
-        raise NotImplementedError
+        # raise NotImplementedError
+        orig_shape = x.shape
+        
+        # 如果输入是3D，将其重塑为2D进行处理
+        if len(orig_shape) == 3:
+            batch_size, seq_len, _ = orig_shape
+            x = x.view(batch_size * seq_len, self.dim)
+        
+        batch = x.shape[0]
+        
+        # 计算均值和方差
+        mean = x.mean(dim=1).view(batch, 1)
+        var = x.var(dim=1).view(batch, 1)
+        
+        # 标准化
+        x_norm = (x - mean) / ((var + self.eps) ** 0.5)
+        
+        # 应用缩放和偏移
+        out = x_norm * self.weights.value + self.bias.value
+        
+        # 如果输入是3D，将输出恢复为原始形状
+        if len(orig_shape) == 3:
+            out = out.view(batch_size, seq_len, self.dim)
+            
+        return out

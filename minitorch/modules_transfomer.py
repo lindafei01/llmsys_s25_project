@@ -45,7 +45,12 @@ class MultiHeadAttention(Module):
         self.attn_hidden_dim = n_embd // n_head
 
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        # raise NotImplementedError
+        self.q_projection = Linear(n_embd, n_embd, bias=bias, backend=self.backend)
+        self.k_projection = Linear(n_embd, n_embd, bias=bias, backend=self.backend)
+        self.v_projection = Linear(n_embd, n_embd, bias=bias, backend=self.backend)
+        self.out_projection = Linear(n_embd, n_embd, bias=bias, backend=self.backend)
+        self.dropout = Dropout(p_dropout)
 
     def create_causal_mask(self, bs, nh, seq_len):
         """
@@ -69,7 +74,10 @@ class MultiHeadAttention(Module):
         batch_size, seq_len, n_embd = x.shape
         
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        # raise NotImplementedError
+        q = self.q_projection(x).view(batch_size, seq_len, self.n_head, self.attn_hidden_dim).permute(0, 2, 1, 3)
+        kT = self.k_projection(x).view(batch_size, seq_len, self.n_head, self.attn_hidden_dim).permute(0, 2, 3, 1)
+        v = self.v_projection(x).view(batch_size, seq_len, self.n_head, self.attn_hidden_dim).permute(0, 2, 1, 3)
         
         return q, kT, v
 
@@ -96,7 +104,21 @@ class MultiHeadAttention(Module):
         
         if not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
-            raise NotImplementedError
+            # raise NotImplementedError
+            scores = q @ kT # (batch_size, num_heads, seq_len, seq_len)
+            scores = scores / (self.attn_hidden_dim ** 0.5)
+            if self.causal:
+                scores = scores + self.create_causal_mask(queries_len)
+            
+            attn = softmax(scores, dim=3)
+            attn = self.dropout(attn)
+            result = attn @ v # (batch_size, num_heads, seq_len, attn_hidden_dim)
+
+            result = result.contiguous()
+            result = result.permute(0, 2, 1, 3)
+            result = result.contiguous()
+            result = result.view(batch_size, queries_len, self.n_embd)
+            result = self.out_projection(result)
         else:
             # BEGIN ASSIGN3_3
             raise NotImplementedError
@@ -115,7 +137,9 @@ class MultiHeadAttention(Module):
         """
         batch_size, seq_len, n_embd = x.shape
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        # raise NotImplementedError
+        q, kT, v = self.project_to_query_key_value(x)
+        return self.self_attention(q, kT, v)
 
 
 class FeedForward(Module):
@@ -135,7 +159,10 @@ class FeedForward(Module):
             dropout    : dropout layer
         """
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        # raise NotImplementedError
+        self.linear_in  = Linear(n_embd, middle_dim, bias=bias, backend=backend)
+        self.linear_out = Linear(middle_dim, n_embd, bias=bias, backend=backend)
+        self.dropout    = Dropout(p_dropout)
 
     def forward(self, x):
         """A FFN Module in a Pre-LN Transformer with GELU Activation and dropout.
@@ -149,7 +176,9 @@ class FeedForward(Module):
         batch_size, seq_len, n_embd = x.shape
 
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        # raise NotImplementedError
+        x = GELU(self.linear_in(x.view(batch_size * seq_len, n_embd)))
+        x = self.dropout(self.linear_out(x)).view(batch_size, seq_len, n_embd)
 
         return x
 
@@ -175,14 +204,19 @@ class TransformerLayer(Module):
         # COPY FROM ASSIGN2_4
         # self.attention
         # self.ff
-        raise NotImplementedError
+        # raise NotImplementedError
+        self.backend = backend
+        self.attention = MultiHeadAttention(n_embd=n_embd, n_head=n_head, p_dropout=p_dropout, bias=bias, backend=self.backend)
+        self.ff = FeedForward(n_embd=n_embd, middle_dim=4*n_embd, p_dropout=p_dropout, bias=bias, backend=self.backend)
 
         self.use_fused_kernel = use_fused_kernel
         if not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
             # self.ln_1
             # self.ln_2
-            raise NotImplementedError
+            # raise NotImplementedError
+            self.ln_1 = LayerNorm1d(dim=n_embd, eps=ln_eps, backend=self.backend)
+            self.ln_2 = LayerNorm1d(dim=n_embd, eps=ln_eps, backend=self.backend)
         else:
             # BEGIN ASSIGN3_3
             raise NotImplementedError
@@ -198,7 +232,13 @@ class TransformerLayer(Module):
         
         if not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
-            raise NotImplementedError
+            # raise NotImplementedError
+            attn_ln = self.ln_1(x)
+            attn_out = self.attention(attn_ln)
+            x = x + attn_out
+            ff_ln = self.ln_2(x)
+            ff_out = self.ff(ff_ln)
+            return x + ff_out
         else:
             # BEGIN ASSIGN3_3
             raise NotImplementedError
@@ -256,13 +296,22 @@ class DecoderLM(Module):
         # self.t_layer_4           = 
         # self.dropout             = 
         # self.lm_head             = 
-        raise NotImplementedError
+        # raise NotImplementedError
+        self.token_embeddings    = Embedding(n_vocab, n_embd, backend)
+        self.position_embeddings = Embedding(n_positions, n_embd, backend)
+        self.t_layer_1           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend)
+        self.t_layer_2           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend)
+        self.t_layer_3           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend)
+        self.t_layer_4           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend)
+        self.dropout             = Dropout(p_dropout)
+        self.lm_head             = Linear(n_embd, n_vocab, bias, backend)
 
         self.use_fused_kernel = use_fused_kernel
         if not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
             # self.ln                  = 
-            raise NotImplementedError
+            # raise NotImplementedError
+            self.ln              = LayerNorm1d(n_embd, eps=ln_eps, backend=backend)
         else:
             # BEGIN ASSIGN3_3
             raise NotImplementedError
@@ -282,10 +331,28 @@ class DecoderLM(Module):
 
         if not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
-            raise NotImplementedError
+            # raise NotImplementedError
+            token_embeddings = self.token_embeddings(idx)
+
+            # positions = tensor_from_numpy(np.arange(seq_len).reshape(1, seq_len).repeat(batch_size, axis=0), 
+            #                 backend=self.backend)
+            # positional_embeddings = self.position_embeddings(positions)
+            positional_embeddings = self.position_embeddings(pos)
+
+            x = self.dropout(token_embeddings + positional_embeddings)
+            # Pass through each transformer Layer
+            x = self.t_layer_1(x)
+            x = self.t_layer_2(x)
+            x = self.t_layer_3(x)
+            x = self.t_layer_4(x)
+            # Final LayerNorm
+            x = self.ln(x)
+            # Get correct shape
+            x = self.lm_head(x)
         else:
             # BEGIN ASSIGN3_3
             raise NotImplementedError
+            # 稍微注意一下上面改动的部分
             # END ASSIGN3_3
 
         return x

@@ -36,6 +36,7 @@ bias: [hidden_size], ln bias
 template <typename T>
 __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
                                const T *scale, const T *bias, int hidden_size) {
+  // 根据gridDim.x和blockDim.x，可知一个block负责一个seq,一个thread负责一个hidden_dimension
   
   /// BEGIN ASSIGN3_2
   /// TODO
@@ -46,17 +47,60 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   
   // Step 1
   float l_sum = 0;
+  float l_square_sum = 0;
   const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp) + blockIdx.x * hidden_size;  
   for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float4 val = inp_f4[idx];
     l_sum += val.x + val.y + val.z + val.w;
-  }
+    l_square_sum += val.x * val.x + val.y * val.y + val.z * val.z + val.w * val.w;
+  } // 问题：当idx=hidden_size-3时，取出来的val时什么，val.x, val,y, val.z, val.w
+  //对这个问题的理解会直接影响到对l_sum和l_square_sum求平均的时候需不需要hidden_size*4
+  // problem solved, 我看了一下launch_layernorm里的hidden_dim>>=2, 明白是怎么回事了
 
   // Step 2
+  blockReduce<ReduceType::kSum>(l_sum);
+  blockReduce<ReduceType::kSum>(l_square_sum);
+
+  // 计算均值和方差
+  float mean = l_sum / (hidden_size * 4);
+  float var = l_square_sum / (hidden_size * 4) - mean * mean;
+  var = var + LN_EPSILON;  // 添加数值稳定性项
+
+  // 将结果写入共享内存
+  __shared__ float s_mean;
+  __shared__ float s_var;
+  if (threadIdx.x == 0) {
+    s_mean = mean;
+    s_var = var;
+    if (means != nullptr) {
+      means[blockIdx.x] = mean;
+    }
+    if (vars != nullptr) {
+      vars[blockIdx.x] = var;
+    }
+  }
+  __syncthreads();
 
   // Step 3
+  float4 *res_f4 = reinterpret_cast<float4 *>(ln_res) + blockIdx.x * hidden_size;
+  const float4 *scale_f4 = reinterpret_cast<const float4 *>(scale);
+  const float4 *bias_f4 = reinterpret_cast<const float4 *>(bias);
   
-  assert(false && "Not Implemented");
+  for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    float4 val = inp_f4[idx];
+    float4 scale_val = scale_f4[idx];
+    float4 bias_val = bias_f4[idx];
+    
+    // 计算标准化后的值
+    float4 res;
+    res.x = scale_val.x * (val.x - s_mean) / sqrtf(s_var) + bias_val.x;
+    res.y = scale_val.y * (val.y - s_mean) / sqrtf(s_var) + bias_val.y;
+    res.z = scale_val.z * (val.z - s_mean) / sqrtf(s_var) + bias_val.z;
+    res.w = scale_val.w * (val.w - s_mean) / sqrtf(s_var) + bias_val.w;
+    
+    res_f4[idx] = res;
+  }
+  // assert(false && "Not Implemented");
   /// END ASSIGN3_2
 }
 
@@ -158,6 +202,7 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
                                         const T *inp, const T *gamma,
                                         const T *betta, const T *vars,
                                         const T *means, int rows, int width) {
+  // width代表隐藏层的维度，相当于是hidden_size
 
   /// BEGIN ASSIGN3_2
   /// TODO
@@ -171,21 +216,61 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   //      -> Now g.shfl_down helps you do so without consuming any shared memory. g.shfl_down makes it more efficient.
   // 4. Assign the final result to the correct position in the global output
 
-  __shared__ float betta_buffer[TILE_DIM][TILE_DIM];
+  __shared__ float betta_buffer[TILE_DIM][TILE_DIM]; // 每个线程块是32*32的二维结构，x维对应特征维度，y维用于并行处理不同的序列
   __shared__ float gamma_buffer[TILE_DIM][TILE_DIM];
 
   cg::thread_block b = cg::this_thread_block();
   cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
 
   // Step 1
+  int col = blockIdx.x * blockDim.x + threadIdx.x;
+  float sum_dgamma = 0.0f;
+  float sum_dbetta = 0.0f;
+
+  if (col < width) {
+      for (int row = threadIdx.y; row < rows; row += blockDim.y) {
+          int idx = row * width + col;
+          float dout = out_grad[idx];
+          float x = inp[idx];
+          float xhat;
+          
+          if (means != nullptr) {
+              // 使用 means 和 vars 计算 xhat
+              float mean = means[row];
+              float var_rsqrt = rsqrtf(vars[row]);
+              xhat = (x - mean) * var_rsqrt;
+          } else {
+              // 使用 output 和 beta 计算 xhat
+              float b = betta[col];
+              float g = gamma[col];
+              xhat = (x - b) / g;
+          }
+          
+          sum_dgamma += dout * xhat;
+          sum_dbetta += dout;
+      }
+  }
+     
 
   // Step 2
+  betta_buffer[threadIdx.y][threadIdx.x] = sum_dbetta;
+  gamma_buffer[threadIdx.y][threadIdx.x] = sum_dgamma;
+  __syncthreads();
   
   // Step 3
-  
-  // Step 4
+  for (int i = g.size() / 2; i > 0; i /= 2) {
+      sum_dbetta += g.shfl_down(sum_dbetta, i);
+      sum_dgamma += g.shfl_down(sum_dgamma, i);
+  }
+  // 第一轮:i=16, 线程0和16规约，1和17规约
 
-  assert(false && "Not Implemented");
+  // Step 4
+  if (threadIdx.y == 0 && col < width) {
+      betta_grad[col] = sum_dbetta;
+      gamma_grad[col] = sum_dgamma;
+  }
+
+  // assert(false && "Not Implemented");
   /// END ASSIGN3_2
 }
 
@@ -233,14 +318,95 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   // 4. Compute final gradient
   
   // Step 1
+  float dxhat_sum = 0;
+  float dxhat_xhat_sum = 0;
+  
+  const float4 *out_grad_f4 = reinterpret_cast<const float4 *>(out_grad) + blockIdx.x * hidden_dim;
+  const float4 *gamma_f4 = reinterpret_cast<const float4 *>(gamma);
+  const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp) + blockIdx.x * hidden_dim;
  
   // Step 2
-   
+  for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
+      float4 dout = out_grad_f4[idx];
+      float4 g = gamma_f4[idx];
+      float4 x = inp_f4[idx];
+      
+      // 计算dxhat
+      float4 dxhat;
+      dxhat.x = dout.x * g.x;
+      dxhat.y = dout.y * g.y;
+      dxhat.z = dout.z * g.z;
+      dxhat.w = dout.w * g.w;
+      
+      // 计算xhat
+      float4 xhat;
+      if (means != nullptr) {
+          // 使用means计算xhat
+          float mean = means[blockIdx.x];
+          float var_rsqrt = rsqrtf(vars[blockIdx.x]);
+          xhat.x = (x.x - mean) * var_rsqrt;
+          xhat.y = (x.y - mean) * var_rsqrt;
+          xhat.z = (x.z - mean) * var_rsqrt;
+          xhat.w = (x.w - mean) * var_rsqrt;
+      } else {
+          // 使用output和beta计算xhat
+          xhat.x = (x.x - b.x) / g.x;
+          xhat.y = (x.y - b.y) / g.y;
+          xhat.z = (x.z - b.z) / g.z;
+          xhat.w = (x.w - b.w) / g.w;
+      }
+      
+      // 累加和
+      dxhat_sum += dxhat.x + dxhat.y + dxhat.z + dxhat.w;
+      dxhat_xhat_sum += dxhat.x * xhat.x + dxhat.y * xhat.y + 
+                        dxhat.z * xhat.z + dxhat.w * xhat.w;
+  }  
+
   // Step 3
- 
+  blockReduce<ReduceType::kSum>(dxhat_sum);
+  blockReduce<ReduceType::kSum>(dxhat_xhat_sum);
+
   // Step 4
+  float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad) + blockIdx.x * hidden_dim;
+  float var_rsqrt = rsqrtf(vars[blockIdx.x]);
+  float n = hidden_dim * 4;
   
-  assert(false && "Not Implemented");
+  for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
+      float4 dout = out_grad_f4[idx];
+      float4 g = gamma_f4[idx];
+      float4 x = inp_f4[idx];
+      float mean = means[blockIdx.x];
+      
+      float4 xhat;
+      if (means != nullptr) {
+          float mean = means[blockIdx.x];
+          xhat.x = (x.x - mean) * var_rsqrt;
+          xhat.y = (x.y - mean) * var_rsqrt;
+          xhat.z = (x.z - mean) * var_rsqrt;
+          xhat.w = (x.w - mean) * var_rsqrt;
+      } else {
+          xhat.x = (x.x - b.x) / g.x;
+          xhat.y = (x.y - b.y) / g.y;
+          xhat.z = (x.z - b.z) / g.z;
+          xhat.w = (x.w - b.w) / g.w;
+      }
+      
+      float4 dxhat;
+      dxhat.x = dout.x * g.x;
+      dxhat.y = dout.y * g.y;
+      dxhat.z = dout.z * g.z;
+      dxhat.w = dout.w * g.w;
+      
+      float4 dx;
+      dx.x = (dxhat.x - (dxhat_sum + xhat.x * dxhat_xhat_sum) / n) * var_rsqrt;
+      dx.y = (dxhat.y - (dxhat_sum + xhat.y * dxhat_xhat_sum) / n) * var_rsqrt;
+      dx.z = (dxhat.z - (dxhat_sum + xhat.z * dxhat_xhat_sum) / n) * var_rsqrt;
+      dx.w = (dxhat.w - (dxhat_sum + xhat.w * dxhat_xhat_sum) / n) * var_rsqrt;
+      
+      inp_grad_f4[idx] = dx;
+  }
+
+  // assert(false && "Not Implemented");
   /// END ASSIGN3_2
 }
 extern "C" {

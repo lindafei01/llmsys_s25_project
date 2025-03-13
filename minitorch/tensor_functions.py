@@ -419,13 +419,30 @@ class Attn_Softmax(Function):
     @staticmethod
     def forward(ctx: Context, inp: Tensor, mask: Tensor) -> Tensor:
       #   BEGIN ASSIGN3_1 
-      raise NotImplementedError("Need to implement for Assignment 3")
+    #   raise NotImplementedError("Need to implement for Assignment 3")
+        # Save input and mask for backward pass
+        ctx.save_for_backward(inp, mask)
+
+        # Apply softmax using CUDA kernel
+        # This will modify inp in-place
+        out = inp.f.attn_softmax_fw(inp, mask)
+        
+        return out
+
       #   END ASSIGN3_1
 
     @staticmethod
     def backward(ctx: Context, out_grad: Tensor) -> Tensor:
       #   BEGIN ASSIGN3_1 
-      raise NotImplementedError("Need to implement for Assignment 3")
+    #   raise NotImplementedError("Need to implement for Assignment 3")
+        # Get saved tensors from forward pass
+        (soft_inp,) = ctx.saved_values
+        
+        # Compute gradients using backward CUDA kernel
+        grad_inp = out_grad.f.attn_softmax_bw(out_grad, soft_inp)
+        
+        # Return gradients (None for mask since it doesn't require gradient)
+        return grad_inp, None
       #   END ASSIGN3_1
 
 
@@ -433,13 +450,35 @@ class LayerNorm(Function):
     @staticmethod
     def forward(ctx: Context, inp: Tensor, gamma: Tensor, beta: Tensor) -> Tensor:
       #   BEGIN ASSIGN3_2 
-      raise NotImplementedError("Need to implement for Assignment 3")
+    #   raise NotImplementedError("Need to implement for Assignment 3")
+        # 保存输入用于反向传播
+        ctx.save_for_backward(inp, gamma, beta)
+        
+        # 调用CUDA核函数
+        out = inp.f.layernorm_fw(inp, gamma, beta)
+        
+        return out
       #   END ASSIGN3_2
 
     @staticmethod
     def backward(ctx: Context, out_grad: Tensor) -> Tensor:
       #   BEGIN ASSIGN3_2
-      raise NotImplementedError("Need to implement for Assignment 3")
+    #   raise NotImplementedError("Need to implement for Assignment 3")
+        # 获取前向传播保存的值
+        inp, gamma, beta = ctx.saved_values
+        
+        # 计算均值和方差
+        batch_size = inp.shape[0]
+        hidden_dim = inp.shape[-1]
+        mean = inp.sum(dim=-1).view(batch_size, 1) / hidden_dim
+        var = ((inp - mean) ** 2).sum(dim=-1).view(batch_size, 1) / hidden_dim
+        
+        # 调用CUDA核函数计算梯度
+        inp_grad, gamma_grad, beta_grad = out_grad.f.layernorm_bw(
+            out_grad, inp, gamma, beta, var, mean
+        )
+        
+        return inp_grad, gamma_grad, beta_grad
       #   END ASSIGN3_2
 
 

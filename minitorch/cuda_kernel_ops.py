@@ -406,18 +406,137 @@ class CudaKernelOps(TensorOps):
     @staticmethod
     def attn_softmax_bw(out_grad: Tensor, soft_inp: Tensor):
       #   BEGIN ASSIGN3_1
-      raise("Not implemented")
+        #   raise("Not implemented")
+        # Get dimensions
+        batch_size, nhead, from_len, to_len = out_grad.shape
+        rows = batch_size * nhead * from_len  # total number of rows
+        softmax_len = to_len  # sequence length
+        
+        # Get CUDA stream
+        stream = torch.cuda.current_stream().cuda_stream
+        
+        # Define argument types for the CUDA kernel
+        lib_softmax.launch_attn_softmax_bw.argtypes = [
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # out_grad
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # soft_inp
+            ctypes.c_int,    # rows
+            ctypes.c_int,    # softmax_len
+            ctypes.c_void_p  # stream
+        ]
+        lib_softmax.launch_attn_softmax_bw.restype = None
+        
+        # Call the CUDA kernel
+        lib_softmax.launch_attn_softmax_bw(
+            out_grad._tensor._storage,
+            soft_inp._tensor._storage,
+            rows,
+            softmax_len,
+            stream
+        )
+        
+        return out_grad
       #   END ASSIGN3_1
 
     @staticmethod
     def layernorm_fw(inp: Tensor, gamma: Tensor, beta: Tensor):
       #   BEGIN ASSIGN3_2
-      raise("Not implemented")
+    #   raise("Not implemented")
+        # 获取输入维度
+        batch_size = inp.shape[0]
+        hidden_dim = inp.shape[-1]
+        
+        # 获取CUDA流
+        stream = torch.cuda.current_stream().cuda_stream
+        
+        # 定义参数类型
+        lib_layernorm.launch_layernorm.argtypes = [
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # ln_res
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # vars
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # means
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # inp
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # scale
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # bias
+            ctypes.c_int,    # batch_size
+            ctypes.c_int,    # hidden_dim
+            ctypes.c_void_p  # stream
+        ]
+        lib_layernorm.launch_layernorm.restype = None
+        
+        # 创建输出张量
+        out = inp.zeros(inp.shape)
+        
+        # 创建中间结果张量
+        vars = inp.zeros((batch_size,))
+        means = inp.zeros((batch_size,))
+        
+        # 调用CUDA核函数
+        lib_layernorm.launch_layernorm(
+            out._tensor._storage,
+            vars._tensor._storage,
+            means._tensor._storage,
+            inp._tensor._storage,
+            gamma._tensor._storage,
+            beta._tensor._storage,
+            batch_size,
+            hidden_dim,
+            stream
+        )
+        
+        return out
       #   END ASSIGN3_2
       
     @staticmethod
     def layernorm_bw(out_grad: Tensor, inp: Tensor, gamma: Tensor, beta: Tensor, var: Tensor, mean: Tensor):
       #   BEGIN ASSIGN3_2
-      raise("Not implemented")
+    #   raise("Not implemented")
+        # 获取维度
+        batch_size = out_grad.shape[0]
+        hidden_dim = out_grad.shape[-1]
+        
+        # 获取CUDA流
+        stream_1 = torch.cuda.current_stream().cuda_stream
+        stream_2 = torch.cuda.current_stream().cuda_stream
+        
+        # 定义参数类型
+        lib_layernorm.launch_layernorm_bw.argtypes = [
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # gamma_grad
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # beta_grad
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # inp_grad
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # out_grad
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # inp
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # gamma
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # beta
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # vars
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # means
+            ctypes.c_int,    # batch_size
+            ctypes.c_int,    # hidden_dim
+            ctypes.c_void_p, # stream_1
+            ctypes.c_void_p  # stream_2
+        ]
+        lib_layernorm.launch_layernorm_bw.restype = None
+        
+        # 创建输出梯度张量
+        gamma_grad = gamma.zeros(gamma.shape)
+        beta_grad = beta.zeros(beta.shape)
+        inp_grad = inp.zeros(inp.shape)
+        
+        # 调用CUDA核函数
+        lib_layernorm.launch_layernorm_bw(
+            gamma_grad._tensor._storage,
+            beta_grad._tensor._storage,
+            inp_grad._tensor._storage,
+            out_grad._tensor._storage,
+            inp._tensor._storage,
+            gamma._tensor._storage,
+            beta._tensor._storage,
+            var._tensor._storage,
+            mean._tensor._storage,
+            batch_size,
+            hidden_dim,
+            stream_1,
+            stream_2
+        )
+        
+        return inp_grad, gamma_grad, beta_grad   
       #   END ASSIGN3_2
       

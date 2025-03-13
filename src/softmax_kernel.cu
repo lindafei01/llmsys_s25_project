@@ -32,9 +32,26 @@ attn_mask: [batch_size, to_len], padding tokens are -inf,
   attn_mask=nullptr and mask_future=ture for dec-self-attn training
   attn_mask=nullptr and mask_future=false for dec-self-attn infer
 */
-template <typename T, int block_dim, int ele_per_thread>
+template <typename T, int block_dim, int ele_per_thread> 
+// T: 数据类型；
+// block_dim: 块大小（32），表示每个block包含32个线程，这个数字选择32是因为它等于一个warp的大小
+// CUDA的warp大小是32个线程，一个warp内的线程是同步执行的，当block_dim=32时，整个block正好是一个warp，这样可以避免不必要的同步开销，最大化硬件利用率；
+// ele_per_thread：每个线程处理的元素数量
 __global__ void ker_attn_softmax_lt32(T *inp, const T *attn_mask, int from_len,
                                       int to_len, bool mask_future) {
+// __global__ 表示这是一个GPU内核函数，在GPU上执行
+// ker_attn_softmax_lt32：内核函数名
+// T *inp：输入张量，表示输入的注意力分数矩阵
+// const T *attn_mask：注意力掩码，表示哪些位置是填充的
+// int from_len：输入序列的长度
+// int to_len：输出序列的长度
+// bool mask_future：是否考虑未来的填充
+// 稍微说明一下from_len和to_len: Q: [batch_size, nhead, from_len, dim]
+// K: [batch_size, nhead, to_len, dim]
+// V: [batch_size, nhead, to_len, dim]
+// Attention: [batch_size, nhead, from_len, to_len]
+// 在自注意力中: from_len == to_len
+// 在encoder-decoder注意力中: from_len = 解码器当前序列长度, to_len = 编码器输出序列长度
   int batch_id = blockIdx.y;
   int head_id = blockIdx.z;
   const int nhead = gridDim.z;
@@ -46,18 +63,18 @@ __global__ void ker_attn_softmax_lt32(T *inp, const T *attn_mask, int from_len,
   typedef cub::BlockStore<T, block_dim, ele_per_thread,
                           cub::BLOCK_STORE_VECTORIZE>
       BlockStore;
-  __shared__ typename BlockStore::TempStorage ts_store;
+  __shared__ typename BlockStore::TempStorage ts_store; // ts_load, ts_store是存储在shared memory中的
 
-  T mval[ele_per_thread];
+  T mval[ele_per_thread]; // 存储当前线程块的mask值
   if (attn_mask) {
-    attn_mask += batch_id * to_len;
+    attn_mask += batch_id * to_len; // 移动指针到当前batch的mask位置
     BlockLoad(ts_load).Load(attn_mask, mval, to_len, REDUCE_FLOAT_INF_NEG);
-  }
-
-  inp += flat_3dim(batch_id, head_id, 0, nhead, from_len * to_len);
+  }// attn_mask:源数据，从这里读取数据；mval: 目标数组，数据将被加载到这里; to_len:要加载的数据长度；REDUCE_FLOAT_INF_NEG:默认值，如果访问越界，使用这个值
+  // Blockload: CUB库中的一个函数，会自动将数据分配给线程块中的所有线程。线程0: mval[0] = attn_mask[0], 线程1: mval[0] = attn_mask[1]，线程2: mval[0] = attn_mask[2], ..., 线程31: mval[0] = attn_mask[31]
+  inp += flat_3dim(batch_id, head_id, 0, nhead, from_len * to_len);// 将4维数组的索引转换为1维的内存偏移量
   for (int token_id = blockIdx.x * token_per_reduce; token_id < from_len;
        token_id += gridDim.x * token_per_reduce) {
-    T inp_val[token_per_reduce][ele_per_thread];
+    T inp_val[token_per_reduce][ele_per_thread];//存储需要处理的输入数据
     for (int i = 0; i < token_per_reduce && (token_id + i) < from_len; i++) {
       BlockLoad(ts_load).Load(inp + (token_id + i) * to_len, inp_val[i], to_len,
                               REDUCE_FLOAT_INF_NEG);
@@ -82,12 +99,12 @@ __global__ void ker_attn_softmax_lt32(T *inp, const T *attn_mask, int from_len,
           }
         }
         val[i][j] = temp_val;
-        l_max[i] = fmaxf(l_max[i], temp_val);
+        l_max[i] = fmaxf(l_max[i], temp_val); // CUDA中的一个内置函数，用于计算两个浮点数的最大值。它是C标准库中fmax的CUDA版本，专门针对单精度浮点数进行了优化。
       }
     }
     // END ASSIGN3_1
     // warp reduce max
-    warpReduce<ReduceType::kMax, token_per_reduce>(l_max);
+    warpReduce<ReduceType::kMax, token_per_reduce>(l_max);//执行完之后，每个线程都会得到全局最大值
 
     /* step 2. compute sum */
     // thread local sum
@@ -110,12 +127,14 @@ __global__ void ker_attn_softmax_lt32(T *inp, const T *attn_mask, int from_len,
     // Hint: use __fdividef() to compute division
     // Hint: use BlockStore to store the result
     for (int i = 0; i < token_per_reduce && (token_id + i) < from_len; i++) {
-      l_sum[i] = __fdividef(1.0f, l_sum[i] + EPSILON);
+      l_sum[i] = __fdividef(1.0f, l_sum[i] + EPSILON);//__fdividef是CUDA的一个内置函数，用于执行浮点数除法，它比普通的除法运算符更快且更稳定
       for (int j = 0; j < ele_per_thread; j++) {
         inp_val[i][j] = (T)(val[i][j] * l_sum[i]);
       }
       BlockStore(ts_store).Store(inp + (token_id + i) * to_len, inp_val[i],
                                  to_len);
+      //CUB库中的一个函数，用于将数据从线程块高效地存储到global memory中
+      // 线程的局部数组是存储在寄存器里的
     }
     // END ASSIGN3_1
   }  // blockIdx.x
@@ -155,24 +174,48 @@ __global__ void ker_attn_softmax(T *inp, const T *attn_mask, int from_len,
 
     /* step 1. compute max */
     // thread local max
+    float val[token_per_reduce][ele_per_thread];
+    float l_max[token_per_reduce];
     // BEGIN ASSIGN3_1
-    
+    for (int i = 0; i < token_per_reduce; i++) {
+        l_max[i] = REDUCE_FLOAT_INF_NEG;
+        for (int j = 0; j < ele_per_thread; j++) {
+            float temp_val;
+            if (mask_future && ele_per_thread * threadIdx.x + j > token_id + i) {
+                temp_val = REDUCE_FLOAT_INF_NEG;
+            } else {
+                temp_val = (float)inp_val[i][j];
+                if (attn_mask) {
+                    temp_val += (float)mval[j];
+                }
+            }
+            val[i][j] = temp_val;
+            l_max[i] = fmaxf(l_max[i], temp_val);
+        }
+    }
     // END ASSIGN3_1
     // block reduce max
     blockReduce<ReduceType::kMax, token_per_reduce>(l_max);
     // write shared
-    __shared__ float s_max[token_per_reduce];
+    __shared__ float s_max[token_per_reduce];// __sared__用于声明共享内存变量，同一个block内的所有线程都可以访问
     if (threadIdx.x == 0) {
       for (int i = 0; i < token_per_reduce; i++) {
         s_max[i] = l_max[i];
       }
-    }
-    __syncthreads();
+    }//在block reduce之后，所有线程的l_max值都是相同的，所以只需要一个线程写入共享内存就可以了
+    __syncthreads();// __syncthreads() 是 CUDA 中的一个内置函数，用于同步同一个 block 中的所有线程。
 
     /* step 2. compute sum */
     // thread local sum
+    float l_sum[token_per_reduce];
     // BEGIN ASSIGN3_1
-    
+    for (int i = 0; i < token_per_reduce; i++) {
+        l_sum[i] = 0.f;
+        for (int j = 0; j < ele_per_thread; j++) {
+            val[i][j] = __expf(val[i][j] - s_max[i]);
+            l_sum[i] += val[i][j];
+        }
+    }
     // END ASSIGN3_1
     // block reduce sum
     blockReduce<ReduceType::kSum, token_per_reduce>(l_sum);
@@ -187,7 +230,12 @@ __global__ void ker_attn_softmax(T *inp, const T *attn_mask, int from_len,
 
     /* step 3. compute final result */
     // BEGIN ASSIGN3_1
-   
+    for (int i = 0; i < token_per_reduce && (token_id + i) < from_len; i++) {
+        for (int j = 0; j < ele_per_thread; j++) {
+            inp_val[i][j] = (T)(val[i][j] * s_sum[i]);
+        }
+        BlockStore(ts_store).Store(inp + (token_id + i) * to_len, inp_val[i], to_len);
+    }
     // END ASSIGN3_1
   }  // blockIdx.x
 }
@@ -276,8 +324,13 @@ output: [batch_size, nhead, seq_len, seq_len], output of softmax forward.
 */
 template <typename T, int ITERATIONS>
 __global__ void ker_attn_softmax_bw(T *grad, const T *inp, int softmax_length) {
-  int batch_idx = blockIdx.x * blockDim.y + threadIdx.y;
-  int offset = batch_idx * softmax_length + threadIdx.x;
+  // ∂L/∂x = s * (∂L/∂s - sum(∂L/∂s * s))
+  int batch_idx = blockIdx.x * blockDim.y + threadIdx.y; // blockIdx.x: 当前块在网络中x方向的索引。这句是找到当前所在的warp
+  // blockDim.x = WARP_SIZE (通常是32，因为一个warp包含32个线程)
+  // blockDim.y = warps_per_block (在这个代码中设置为4，表示每个块包含4个warp)
+  // 每个warp处理一个batch sample中的一个head的一行数据
+  // softmax_length在这里就是seq_len
+  int offset = batch_idx * softmax_length + threadIdx.x; //计算当前线程要处理的数据位置，处理的是注意力矩阵中的一行数据
 
   grad += offset;
   inp += offset;
@@ -286,7 +339,7 @@ __global__ void ker_attn_softmax_bw(T *grad, const T *inp, int softmax_length) {
   T inp_reg[ITERATIONS];
   float sum = 0.0;
 
-  #pragma unroll
+  #pragma unroll // CUDA中的一个编译器指令, 用于循环展开优化：将循环体中的多次迭代展开成多个独立的代码块
   for (int i = 0; i < ITERATIONS; ++i) {
     int curr_idx = threadIdx.x + i * WARP_SIZE;
     if (curr_idx < softmax_length) {
@@ -296,11 +349,14 @@ __global__ void ker_attn_softmax_bw(T *grad, const T *inp, int softmax_length) {
     }
   }
 
-  cg::thread_block b = cg::this_thread_block();
-  cg::thread_block_tile<WARP_SIZE> g = cg::tiled_partition<WARP_SIZE>(b);
+  cg::thread_block b = cg::this_thread_block(); // 获取当前线程所在的线程块
+  cg::thread_block_tile<WARP_SIZE> g = cg::tiled_partition<WARP_SIZE>(b); // 将线程块分为大小为WARP_SIZE的线程组
 
-  for (int i = 1; i < WARP_SIZE; i <<= 1) sum += g.shfl_xor(sum, i);
-
+  for (int i = 1; i < WARP_SIZE; i <<= 1) sum += g.shfl_xor(sum, i); // i <<= 1: 左移赋值操作
+  // 每个线程都有自己的sum值，线程ID从0到31，掩码值i的变化：1，2，4，5，16
+  // 第一次循环（i=1）：线程0和线程1交换，线程1和线程2交换，线程2和线程3交换，。。。
+  // 第二次循环（i=2），线程0和线程2交换，线程1和线程3交换，线程2和线程0交换，。。。
+  // 。。。这样子，每个线程都获得了松油线程的sum值的总和
   #pragma unroll
   for (int i = 0; i < ITERATIONS; ++i) {
     int curr_idx = threadIdx.x + i * WARP_SIZE;
@@ -315,22 +371,72 @@ void launch_attn_softmax_bw(float *out_grad,
                                 const float *soft_inp, int rows,
                                 int softmax_len,
                                 cudaStream_t stream) {
-  
+  // out_grad是反向传播的输出梯度；形状为[batch_size, nhead, seq_len, seq_len]
+  // soft_inp是softmax的输出；形状和out_grad一致，[batch_size, nhead, seq_len, seq_len]
+  // rows表示需要处理的总行数，rows = batch_size * nhead * seq_len，用于确定需要启动多少个block来处理数据，在 grid 维度计算中使用：(rows + warps_per_block - 1) / warps_per_block
+  // softmax_len表示softmax操作的序列长度，用于确定每个线程需要处理的元素数量
   const int warps_per_block = 4;
   dim3 grid_dim((rows + warps_per_block - 1) / warps_per_block);
   dim3 block_dim(WARP_SIZE, warps_per_block);
   // BEGIN ASSIGN3_1
   
-  
   // Launch kernel
   // Hint: use ker_attn_softmax_bw<float, ITERATIONS> depending on softmax_len
+  ker_attn_softmax_bw<float, 1><<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, softmax_len);
   
+  // yfei: Allocate device memory
+  float *d_out_grad, *d_soft_inp;
+  size_t size = rows * softmax_len * sizeof(float);
+  cudaMalloc((void **)&d_out_grad, size);
+  cudaMalloc((void **)&d_soft_inp, size);  
+
   // Copy back to the host
+  // yfei: Copy data to device
+  cudaMemcpy(d_out_grad, out_grad, size, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_soft_inp, soft_inp, size, cudaMemcpyHostToDevice);
+
+  // yfei: Launch kernel based on sequence length
+  if (softmax_len <= 32) {
+      ker_attn_softmax_bw<float, 1><<<grid_dim, block_dim, 0, stream>>>(
+          d_out_grad, d_soft_inp, softmax_len);
+  } else if (softmax_len <= 64) {
+      ker_attn_softmax_bw<float, 2><<<grid_dim, block_dim, 0, stream>>>(
+          d_out_grad, d_soft_inp, softmax_len);
+  } else if (softmax_len <= 128) {
+      ker_attn_softmax_bw<float, 4><<<grid_dim, block_dim, 0, stream>>>(
+          d_out_grad, d_soft_inp, softmax_len);
+  } else if (softmax_len <= 256) {
+      ker_attn_softmax_bw<float, 8><<<grid_dim, block_dim, 0, stream>>>(
+          d_out_grad, d_soft_inp, softmax_len);
+  } else if (softmax_len <= 384) {
+      ker_attn_softmax_bw<float, 12><<<grid_dim, block_dim, 0, stream>>>(
+          d_out_grad, d_soft_inp, softmax_len);
+  } else if (softmax_len <= 512) {
+      ker_attn_softmax_bw<float, 16><<<grid_dim, block_dim, 0, stream>>>(
+          d_out_grad, d_soft_inp, softmax_len);
+  } else if (softmax_len <= 768) {
+      ker_attn_softmax_bw<float, 24><<<grid_dim, block_dim, 0, stream>>>(
+          d_out_grad, d_soft_inp, softmax_len);
+  } else if (softmax_len <= 1024) {
+      ker_attn_softmax_bw<float, 32><<<grid_dim, block_dim, 0, stream>>>(
+          d_out_grad, d_soft_inp, softmax_len);
+  } else if (softmax_len <= 2048) {
+      ker_attn_softmax_bw<float, 64><<<grid_dim, block_dim, 0, stream>>>(
+          d_out_grad, d_soft_inp, softmax_len);
+  } else {
+      throw std::runtime_error("Sequence length > 2048 not supported");
+  }
   
-  
+  // yfei: Copy result back to host
+  cudaMemcpy(out_grad, d_out_grad, size, cudaMemcpyDeviceToHost);
 
   // Free memory on device
+  cudaFree(d_out_grad);
+  cudaFree(d_soft_inp);
+
   // END ASSIGN3_1
+
+
 
 }}
 
