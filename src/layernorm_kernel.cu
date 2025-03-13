@@ -58,8 +58,8 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   // problem solved, 我看了一下launch_layernorm里的hidden_dim>>=2, 明白是怎么回事了
 
   // Step 2
-  blockReduce<ReduceType::kSum>(l_sum);
-  blockReduce<ReduceType::kSum>(l_square_sum);
+  blockReduce<ReduceType::kSum, 1>(&l_sum);
+  blockReduce<ReduceType::kSum, 1>(&l_square_sum);
 
   // 计算均值和方差
   float mean = l_sum / (hidden_size * 4);
@@ -324,12 +324,14 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   const float4 *out_grad_f4 = reinterpret_cast<const float4 *>(out_grad) + blockIdx.x * hidden_dim;
   const float4 *gamma_f4 = reinterpret_cast<const float4 *>(gamma);
   const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp) + blockIdx.x * hidden_dim;
- 
+  const float4 *betta_f4 = reinterpret_cast<const float4 *>(betta);
+  
   // Step 2
   for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
       float4 dout = out_grad_f4[idx];
       float4 g = gamma_f4[idx];
       float4 x = inp_f4[idx];
+      float4 b = betta_f4[idx];
       
       // 计算dxhat
       float4 dxhat;
@@ -363,8 +365,8 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   }  
 
   // Step 3
-  blockReduce<ReduceType::kSum>(dxhat_sum);
-  blockReduce<ReduceType::kSum>(dxhat_xhat_sum);
+  blockReduce<ReduceType::kSum, 1>(&dxhat_sum);
+  blockReduce<ReduceType::kSum, 1>(&dxhat_xhat_sum);
 
   // Step 4
   float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad) + blockIdx.x * hidden_dim;

@@ -420,13 +420,13 @@ class Attn_Softmax(Function):
     def forward(ctx: Context, inp: Tensor, mask: Tensor) -> Tensor:
       #   BEGIN ASSIGN3_1 
     #   raise NotImplementedError("Need to implement for Assignment 3")
-        # Save input and mask for backward pass
-        ctx.save_for_backward(inp, mask)
+        inp = inp.contiguous()
+        mask = mask.contiguous()
 
-        # Apply softmax using CUDA kernel
-        # This will modify inp in-place
         out = inp.f.attn_softmax_fw(inp, mask)
-        
+
+        ctx.save_for_backward(out.contiguous())
+
         return out
 
       #   END ASSIGN3_1
@@ -436,13 +436,21 @@ class Attn_Softmax(Function):
       #   BEGIN ASSIGN3_1 
     #   raise NotImplementedError("Need to implement for Assignment 3")
         # Get saved tensors from forward pass
+        out_grad = out_grad.contiguous()
+
         (soft_inp,) = ctx.saved_values
+        soft_inp = soft_inp.contiguous()
         
         # Compute gradients using backward CUDA kernel
         grad_inp = out_grad.f.attn_softmax_bw(out_grad, soft_inp)
+
+        batch_size = out_grad.shape[0]
+        to_len = out_grad.shape[-1]
+        mask_grad = zeros((batch_size, 1, 1,to_len), 
+                         backend=out_grad.backend)
         
         # Return gradients (None for mask since it doesn't require gradient)
-        return grad_inp, None
+        return grad_inp.contiguous(), mask_grad
       #   END ASSIGN3_1
 
 
