@@ -375,6 +375,26 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
       float4 dout = out_grad_f4[idx];
       float4 g = gamma_f4[idx];
       float4 x = inp_f4[idx];
+
+      float4 xhat;
+      if (means != nullptr) {
+          float mean = means[blockIdx.x];
+          xhat.x = (x.x - mean) * var_rsqrt;
+          xhat.y = (x.y - mean) * var_rsqrt;
+          xhat.z = (x.z - mean) * var_rsqrt;
+          xhat.w = (x.w - mean) * var_rsqrt;
+      } else {
+          float4 b = betta_f4[idx];
+          g.x = (abs(g.x) < LN_EPSILON) ? LN_EPSILON : g.x;
+          g.y = (abs(g.y) < LN_EPSILON) ? LN_EPSILON : g.y;
+          g.z = (abs(g.z) < LN_EPSILON) ? LN_EPSILON : g.z;
+          g.w = (abs(g.w) < LN_EPSILON) ? LN_EPSILON : g.w;
+          
+          xhat.x = (x.x - b.x) / g.x;
+          xhat.y = (x.y - b.y) / g.y;
+          xhat.z = (x.z - b.z) / g.z;
+          xhat.w = (x.w - b.w) / g.w;
+      }
       
       float4 dx;
       dx.x = (dout.x * g.x - (dxhat_sum + xhat.x * dxhat_xhat_sum) / m) * var_rsqrt;
