@@ -216,18 +216,16 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   //      -> Now g.shfl_down helps you do so without consuming any shared memory. g.shfl_down makes it more efficient.
   // 4. Assign the final result to the correct position in the global output
 
-  __shared__ float betta_buffer[TILE_DIM][TILE_DIM];
-  __shared__ float gamma_buffer[TILE_DIM][TILE_DIM];
   
   cg::thread_block b = cg::this_thread_block();
   cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
   
-  int col = blockIdx.x * blockDim.x + threadIdx.x;
+  int col = blockIdx.x * blockDim.x + threadIdx.x; //处理第几个hidden size
   float sum_dgamma = 0.0f;
   float sum_dbetta = 0.0f;
   
   if (col < width) {
-      for (int row = threadIdx.y; row < rows; row += blockDim.y) {
+      for (int row = threadIdx.y; row < rows; row += blockDim.y) { //处理当前hidden size对应的第几行
           int idx = row * width + col;
           float dout = out_grad[idx];
           float x = inp[idx];
@@ -236,13 +234,13 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
           if (means != nullptr) {
               // 使用 means 和 vars 计算 xhat
               float mean = means[row];
-              float var = vars[blockIdx.x];
+              float var = max(vars[row], LN_EPSILON);
               float var_rsqrt = rsqrtf(var);
               xhat = (x - mean) * var_rsqrt;
           } else {
               // 使用 output 和 beta 计算 xhat
               float b = betta[col];
-              float g = gamma[col];
+              float g = max(gamma[col], LN_EPSILON);
               xhat = (x - b) / g;
           }
           
@@ -251,7 +249,7 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
       }
   }
   
-  // 使用 shfl_down 进行规约
+  // 使用 shfl_down 进行规约，shfl_down是warp级别的操作，现在我们的block是32*32的，所以这里本质上是把一行的线程（一共32个，正好是一个warp）进行规约
   for (int i = g.size() / 2; i > 0; i /= 2) {
       sum_dgamma += g.shfl_down(sum_dgamma, i);
       sum_dbetta += g.shfl_down(sum_dbetta, i);
@@ -334,7 +332,7 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
       if (means != nullptr) {
           // 使用 means 和 vars 计算 xhat
           float mean = means[blockIdx.x];
-          float var = vars[blockIdx.x];
+          float var = max(vars[blockIdx.x], LN_EPSILON);
           float var_rsqrt = rsqrtf(var);
           
           xhat.x = (x.x - mean) * var_rsqrt;
@@ -345,10 +343,10 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
           // 使用 output 和 beta 计算 xhat
           float4 b = betta_f4[idx];
           
-          xhat.x = (x.x - b.x) / g.x;
-          xhat.y = (x.y - b.y) / g.y;
-          xhat.z = (x.z - b.z) / g.z;
-          xhat.w = (x.w - b.w) / g.w;
+          xhat.x = (x.x - b.x) / max(g.x, LN_EPSILON);
+          xhat.y = (x.y - b.y) / max(g.y, LN_EPSILON);
+          xhat.z = (x.z - b.z) / max(g.z, LN_EPSILON);
+          xhat.w = (x.w - b.w) / max(g.w, LN_EPSILON);
       }
       
       // 累加和
@@ -358,13 +356,14 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   }
   
   // 规约
-  blockReduce<ReduceType::kSum, 1>(&dxhat_sum);
+  blockReduce<ReduceType::kSum, 1>(&dxhat_sum); // 将一个block内所有线程的dxhat_sum和dxhat_xhat_sum都加起来
   blockReduce<ReduceType::kSum, 1>(&dxhat_xhat_sum);
   
   // 计算最终梯度
   float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad) + blockIdx.x * hidden_dim;
-  float var_rsqrt = means != nullptr ? vars[blockIdx.x] : 1.0f;
   float m = hidden_dim * 4.0f;
+  float var = max(vars[blockIdx.x], LN_EPSILON);
+  float var_rsqrt = rsqrtf(var);
   
   for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
       float4 dout = out_grad_f4[idx];
@@ -381,10 +380,10 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
       } else {
           float4 b = betta_f4[idx];
           
-          xhat.x = (x.x - b.x) / g.x;
-          xhat.y = (x.y - b.y) / g.y;
-          xhat.z = (x.z - b.z) / g.z;
-          xhat.w = (x.w - b.w) / g.w;
+          xhat.x = (x.x - b.x) / max(g.x, LN_EPSILON);
+          xhat.y = (x.y - b.y) / max(g.y, LN_EPSILON);
+          xhat.z = (x.z - b.z) / max(g.z, LN_EPSILON);
+          xhat.w = (x.w - b.w) / max(g.w, LN_EPSILON);
       }
       
       float4 dx;
