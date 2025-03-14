@@ -237,12 +237,14 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
           if (means != nullptr) {
               // 使用 means 和 vars 计算 xhat
               float mean = means[row];
-              float var_rsqrt = rsqrtf(vars[row]);
+              float var = max(vars[row], LN_EPSILON);
+              float var_rsqrt = rsqrtf(var);
               xhat = (x - mean) * var_rsqrt;
           } else {
               // 使用 output 和 beta 计算 xhat
               float b = betta[col];
               float g = gamma[col];
+              g = ((abs(g) < LN_EPSILON) ? LN_EPSILON : g);
               xhat = (x - b) / g;
           }
           
@@ -331,7 +333,6 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
       float4 dout = out_grad_f4[idx];
       float4 g = gamma_f4[idx];
       float4 x = inp_f4[idx];
-      float4 b = betta_f4[idx];
       
       // 计算dxhat
       float4 dxhat;
@@ -345,13 +346,21 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
       if (means != nullptr) {
           // 使用means计算xhat
           float mean = means[blockIdx.x];
-          float var_rsqrt = rsqrtf(vars[blockIdx.x]);
+          float var = max(vars[blockIdx.x], LN_EPSILON);
+          float var_rsqrt = rsqrtf(var);
+
           xhat.x = (x.x - mean) * var_rsqrt;
           xhat.y = (x.y - mean) * var_rsqrt;
           xhat.z = (x.z - mean) * var_rsqrt;
           xhat.w = (x.w - mean) * var_rsqrt;
       } else {
           // 使用output和beta计算xhat
+          float4 b = betta_f4[idx];
+          g.x = (abs(g.x) < LN_EPSILON) ? LN_EPSILON : g.x;
+          g.y = (abs(g.y) < LN_EPSILON) ? LN_EPSILON : g.y;
+          g.z = (abs(g.z) < LN_EPSILON) ? LN_EPSILON : g.z;
+          g.w = (abs(g.w) < LN_EPSILON) ? LN_EPSILON : g.w;
+          
           xhat.x = (x.x - b.x) / g.x;
           xhat.y = (x.y - b.y) / g.y;
           xhat.z = (x.z - b.z) / g.z;
@@ -387,6 +396,7 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
           xhat.z = (x.z - mean) * var_rsqrt;
           xhat.w = (x.w - mean) * var_rsqrt;
       } else {
+          float4 b = betta_f4[idx];
           xhat.x = (x.x - b.x) / g.x;
           xhat.y = (x.y - b.y) / g.y;
           xhat.z = (x.z - b.z) / g.z;

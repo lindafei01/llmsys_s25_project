@@ -373,7 +373,7 @@ void launch_attn_softmax_bw(float *out_grad,
                                 cudaStream_t stream) {
   // out_grad是反向传播的输出梯度；形状为[batch_size, nhead, seq_len, seq_len]
   // soft_inp是softmax的输出；形状和out_grad一致，[batch_size, nhead, seq_len, seq_len]
-  // rows表示需要处理的总行数，rows = batch_size * nhead * seq_len，用于确定需要启动多少个block来处理数据，在 grid 维度计算中使用：(rows + warps_per_block - 1) / warps_per_block
+  // 一個warp處理一行，rows表示需要处理的总行数，rows = batch_size * nhead * seq_len，需要(rows + warps_per_block - 1) / warps_per_block個block
   // softmax_len表示softmax操作的序列长度，用于确定每个线程需要处理的元素数量
   const int warps_per_block = 4;
   dim3 grid_dim((rows + warps_per_block - 1) / warps_per_block);
@@ -382,7 +382,7 @@ void launch_attn_softmax_bw(float *out_grad,
   
   // Launch kernel
   // Hint: use ker_attn_softmax_bw<float, ITERATIONS> depending on softmax_len
-  ker_attn_softmax_bw<float, 1><<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, softmax_len);
+//   ker_attn_softmax_bw<float, 1><<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, softmax_len);
   
   // yfei: Allocate device memory
   float *d_out_grad, *d_soft_inp;
