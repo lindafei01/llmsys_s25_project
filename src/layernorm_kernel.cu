@@ -216,17 +216,16 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   //      -> Now g.shfl_down helps you do so without consuming any shared memory. g.shfl_down makes it more efficient.
   // 4. Assign the final result to the correct position in the global output
 
-  __shared__ float betta_buffer[TILE_DIM][TILE_DIM]; // 每个线程块是32*32的二维结构，x维对应特征维度，y维用于并行处理不同的序列
+  __shared__ float betta_buffer[TILE_DIM][TILE_DIM];
   __shared__ float gamma_buffer[TILE_DIM][TILE_DIM];
-
+  
   cg::thread_block b = cg::this_thread_block();
   cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
-
-  // Step 1
+  
   int col = blockIdx.x * blockDim.x + threadIdx.x;
   float sum_dgamma = 0.0f;
   float sum_dbetta = 0.0f;
-
+  
   if (col < width) {
       for (int row = threadIdx.y; row < rows; row += blockDim.y) {
           int idx = row * width + col;
@@ -244,7 +243,7 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
               // 使用 output 和 beta 计算 xhat
               float b = betta[col];
               float g = gamma[col];
-              g = ((abs(g) < LN_EPSILON) ? LN_EPSILON : g);
+              g = (abs(g) < LN_EPSILON) ? LN_EPSILON : g;
               xhat = (x - b) / g;
           }
           
@@ -252,24 +251,16 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
           sum_dbetta += dout;
       }
   }
-     
-
-  // Step 2
-  betta_buffer[threadIdx.y][threadIdx.x] = sum_dbetta;
-  gamma_buffer[threadIdx.y][threadIdx.x] = sum_dgamma;
-  __syncthreads();
   
-  // Step 3
+  // 使用 shfl_down 进行规约
   for (int i = g.size() / 2; i > 0; i /= 2) {
-      sum_dbetta += g.shfl_down(sum_dbetta, i);
       sum_dgamma += g.shfl_down(sum_dgamma, i);
+      sum_dbetta += g.shfl_down(sum_dbetta, i);
   }
-  // 第一轮:i=16, 线程0和16规约，1和17规约
-
-  // Step 4
+  
   if (threadIdx.y == 0 && col < width) {
-      betta_grad[col] = sum_dbetta;
       gamma_grad[col] = sum_dgamma;
+      betta_grad[col] = sum_dbetta;
   }
 
   // assert(false && "Not Implemented");
@@ -319,42 +310,40 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   // 3. Compute reduce sum for dxhat and dxhat*xhat with blockReduce
   // 4. Compute final gradient
   
-  // Step 1
-  float dxhat_sum = 0;
-  float dxhat_xhat_sum = 0;
+  float dxhat_sum = 0.0f;
+  float dxhat_xhat_sum = 0.0f;
   
   const float4 *out_grad_f4 = reinterpret_cast<const float4 *>(out_grad) + blockIdx.x * hidden_dim;
   const float4 *gamma_f4 = reinterpret_cast<const float4 *>(gamma);
   const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp) + blockIdx.x * hidden_dim;
   const float4 *betta_f4 = reinterpret_cast<const float4 *>(betta);
   
-  // Step 2
   for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
       float4 dout = out_grad_f4[idx];
       float4 g = gamma_f4[idx];
       float4 x = inp_f4[idx];
       
-      // 计算dxhat
+      // 计算 dxhat = dout * gamma
       float4 dxhat;
       dxhat.x = dout.x * g.x;
       dxhat.y = dout.y * g.y;
       dxhat.z = dout.z * g.z;
       dxhat.w = dout.w * g.w;
       
-      // 计算xhat
+      // 计算 xhat
       float4 xhat;
       if (means != nullptr) {
-          // 使用means计算xhat
+          // 使用 means 和 vars 计算 xhat
           float mean = means[blockIdx.x];
           float var = max(vars[blockIdx.x], LN_EPSILON);
           float var_rsqrt = rsqrtf(var);
-
+          
           xhat.x = (x.x - mean) * var_rsqrt;
           xhat.y = (x.y - mean) * var_rsqrt;
           xhat.z = (x.z - mean) * var_rsqrt;
           xhat.w = (x.w - mean) * var_rsqrt;
       } else {
-          // 使用output和beta计算xhat
+          // 使用 output 和 beta 计算 xhat
           float4 b = betta_f4[idx];
           g.x = (abs(g.x) < LN_EPSILON) ? LN_EPSILON : g.x;
           g.y = (abs(g.y) < LN_EPSILON) ? LN_EPSILON : g.y;
@@ -371,49 +360,27 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
       dxhat_sum += dxhat.x + dxhat.y + dxhat.z + dxhat.w;
       dxhat_xhat_sum += dxhat.x * xhat.x + dxhat.y * xhat.y + 
                         dxhat.z * xhat.z + dxhat.w * xhat.w;
-  }  
-
-  // Step 3
+  }
+  
+  // 规约
   blockReduce<ReduceType::kSum, 1>(&dxhat_sum);
   blockReduce<ReduceType::kSum, 1>(&dxhat_xhat_sum);
-
-  // Step 4
+  
+  // 计算最终梯度
   float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad) + blockIdx.x * hidden_dim;
-  float var_rsqrt = rsqrtf(vars[blockIdx.x]);
-  float n = hidden_dim * 4;
+  float var_rsqrt = means != nullptr ? rsqrtf(max(vars[blockIdx.x], LN_EPSILON)) : 1.0f;
+  float m = hidden_dim * 4.0f;
   
   for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
       float4 dout = out_grad_f4[idx];
       float4 g = gamma_f4[idx];
       float4 x = inp_f4[idx];
-      float mean = means[blockIdx.x];
-      
-      float4 xhat;
-      if (means != nullptr) {
-          float mean = means[blockIdx.x];
-          xhat.x = (x.x - mean) * var_rsqrt;
-          xhat.y = (x.y - mean) * var_rsqrt;
-          xhat.z = (x.z - mean) * var_rsqrt;
-          xhat.w = (x.w - mean) * var_rsqrt;
-      } else {
-          float4 b = betta_f4[idx];
-          xhat.x = (x.x - b.x) / g.x;
-          xhat.y = (x.y - b.y) / g.y;
-          xhat.z = (x.z - b.z) / g.z;
-          xhat.w = (x.w - b.w) / g.w;
-      }
-      
-      float4 dxhat;
-      dxhat.x = dout.x * g.x;
-      dxhat.y = dout.y * g.y;
-      dxhat.z = dout.z * g.z;
-      dxhat.w = dout.w * g.w;
       
       float4 dx;
-      dx.x = (dxhat.x - (dxhat_sum + xhat.x * dxhat_xhat_sum) / n) * var_rsqrt;
-      dx.y = (dxhat.y - (dxhat_sum + xhat.y * dxhat_xhat_sum) / n) * var_rsqrt;
-      dx.z = (dxhat.z - (dxhat_sum + xhat.z * dxhat_xhat_sum) / n) * var_rsqrt;
-      dx.w = (dxhat.w - (dxhat_sum + xhat.w * dxhat_xhat_sum) / n) * var_rsqrt;
+      dx.x = (dout.x * g.x - (dxhat_sum + xhat.x * dxhat_xhat_sum) / m) * var_rsqrt;
+      dx.y = (dout.y * g.y - (dxhat_sum + xhat.y * dxhat_xhat_sum) / m) * var_rsqrt;
+      dx.z = (dout.z * g.z - (dxhat_sum + xhat.z * dxhat_xhat_sum) / m) * var_rsqrt;
+      dx.w = (dout.w * g.w - (dxhat_sum + xhat.w * dxhat_xhat_sum) / m) * var_rsqrt;
       
       inp_grad_f4[idx] = dx;
   }
