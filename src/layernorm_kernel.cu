@@ -55,7 +55,7 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
     l_square_sum += val.x * val.x + val.y * val.y + val.z * val.z + val.w * val.w;
   } // 问题：当idx=hidden_size-3时，取出来的val时什么，val.x, val,y, val.z, val.w
   //对这个问题的理解会直接影响到对l_sum和l_square_sum求平均的时候需不需要hidden_size*4
-  // problem solved, 我看了一下launch_layernorm里的hidden_dim>>=2, 明白是怎么回事了
+  // problem solved, 看了一下launch_layernorm里的hidden_dim>>=2, 明白是怎么回事了
 
   // Step 2
   blockReduce<ReduceType::kSum, 1>(&l_sum);
@@ -234,14 +234,14 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
           if (means != nullptr) {
               // 使用 means 和 vars 计算 xhat
               float mean = means[row];
-              float var = max(vars[row], LN_EPSILON);
-              float var_rsqrt = rsqrtf(var);
-              xhat = (x - mean) * var_rsqrt;
+              float var = vars[row];
+              float std = sqrtf(var);
+              xhat = (x - mean) / (std + LN_EPSILON);
           } else {
               // 使用 output 和 beta 计算 xhat
-              float b = betta[col];
-              float g = max(gamma[col], LN_EPSILON);
-              xhat = (x - b) / g;
+              float be = betta[col];
+              float ga = gamma[col];
+              xhat = (x - be) / (ga + LN_EPSILON);
           }
           
           sum_dgamma += dout * xhat;
@@ -333,20 +333,20 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
           // 使用 means 和 vars 计算 xhat
           float mean = means[blockIdx.x];
           float var = max(vars[blockIdx.x], LN_EPSILON);
-          float var_rsqrt = rsqrtf(var);
+          float std = sqrtf(var);
           
-          xhat.x = (x.x - mean) * var_rsqrt;
-          xhat.y = (x.y - mean) * var_rsqrt;
-          xhat.z = (x.z - mean) * var_rsqrt;
-          xhat.w = (x.w - mean) * var_rsqrt;
+          xhat.x = (x.x - mean) / (std + LN_EPSILON);
+          xhat.y = (x.y - mean) / (std + LN_EPSILON);
+          xhat.z = (x.z - mean) / (std + LN_EPSILON);
+          xhat.w = (x.w - mean) / (std + LN_EPSILON);
       } else {
           // 使用 output 和 beta 计算 xhat
           float4 b = betta_f4[idx];
           
-          xhat.x = (x.x - b.x) / max(g.x, LN_EPSILON);
-          xhat.y = (x.y - b.y) / max(g.y, LN_EPSILON);
-          xhat.z = (x.z - b.z) / max(g.z, LN_EPSILON);
-          xhat.w = (x.w - b.w) / max(g.w, LN_EPSILON);
+          xhat.x = (x.x - b.x) / (g.x + LN_EPSILON);
+          xhat.y = (x.y - b.y) / (g.y + LN_EPSILON);
+          xhat.z = (x.z - b.z) / (g.z + LN_EPSILON);
+          xhat.w = (x.w - b.w) / (g.w + LN_EPSILON);
       }
       
       // 累加和
@@ -358,12 +358,13 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   // 规约
   blockReduce<ReduceType::kSum, 1>(&dxhat_sum); // 将一个block内所有线程的dxhat_sum和dxhat_xhat_sum都加起来
   blockReduce<ReduceType::kSum, 1>(&dxhat_xhat_sum);
+  __syncthreads();
   
   // 计算最终梯度
   float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad) + blockIdx.x * hidden_dim;
   float m = hidden_dim * 4.0f;
   float var = max(vars[blockIdx.x], LN_EPSILON);
-  float var_rsqrt = rsqrtf(var);
+  float std = sqrtf(var);
   
   for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
       float4 dout = out_grad_f4[idx];
@@ -373,24 +374,24 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
       float4 xhat;
       if (means != nullptr) {
           float mean = means[blockIdx.x];
-          xhat.x = (x.x - mean) * var_rsqrt;
-          xhat.y = (x.y - mean) * var_rsqrt;
-          xhat.z = (x.z - mean) * var_rsqrt;
-          xhat.w = (x.w - mean) * var_rsqrt;
+          xhat.x = (x.x - mean) / (std + LN_EPSILON);
+          xhat.y = (x.y - mean) / (std + LN_EPSILON);
+          xhat.z = (x.z - mean) / (std + LN_EPSILON);
+          xhat.w = (x.w - mean) / (std + LN_EPSILON);
       } else {
           float4 b = betta_f4[idx];
           
-          xhat.x = (x.x - b.x) / max(g.x, LN_EPSILON);
-          xhat.y = (x.y - b.y) / max(g.y, LN_EPSILON);
-          xhat.z = (x.z - b.z) / max(g.z, LN_EPSILON);
-          xhat.w = (x.w - b.w) / max(g.w, LN_EPSILON);
+          xhat.x = (x.x - b.x) / (g.x + LN_EPSILON);
+          xhat.y = (x.y - b.y) / (g.y + LN_EPSILON);
+          xhat.z = (x.z - b.z) / (g.z + LN_EPSILON);
+          xhat.w = (x.w - b.w) / (g.w + LN_EPSILON);
       }
       
       float4 dx;
-      dx.x = (dout.x * g.x - (dxhat_sum + xhat.x * dxhat_xhat_sum) / m) * var_rsqrt;
-      dx.y = (dout.y * g.y - (dxhat_sum + xhat.y * dxhat_xhat_sum) / m) * var_rsqrt;
-      dx.z = (dout.z * g.z - (dxhat_sum + xhat.z * dxhat_xhat_sum) / m) * var_rsqrt;
-      dx.w = (dout.w * g.w - (dxhat_sum + xhat.w * dxhat_xhat_sum) / m) * var_rsqrt;
+      dx.x = (dout.x * g.x - (dxhat_sum + xhat.x * dxhat_xhat_sum) / m) / std;
+      dx.y = (dout.y * g.y - (dxhat_sum + xhat.y * dxhat_xhat_sum) / m) / std;
+      dx.z = (dout.z * g.z - (dxhat_sum + xhat.z * dxhat_xhat_sum) / m) / std;
+      dx.w = (dout.w * g.w - (dxhat_sum + xhat.w * dxhat_xhat_sum) / m) / std;
       
       inp_grad_f4[idx] = dx;
   }

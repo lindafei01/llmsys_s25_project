@@ -121,7 +121,23 @@ class MultiHeadAttention(Module):
             result = self.out_projection(result)
         else:
             # BEGIN ASSIGN3_3
-            raise NotImplementedError
+            # raise NotImplementedError
+            scores = q @ kT
+            scores = scores / (self.attn_hidden_dim ** 0.5)
+            mask = None
+            if self.causal:
+                mask = self.create_causal_mask(batch_size, num_head, queries_len)
+            
+            from .tensor_functions import Attn_Softmax
+            attn = Attn_Softmax.apply(scores, mask if mask is not None else scores.zeros((batch_size, 1, 1, queries_len)))
+            attn = self.dropout(attn)
+            result = attn @ v
+            
+            result = result.contiguous()
+            result = result.permute(0, 2, 1, 3)
+            result = result.contiguous()
+            result = result.view(batch_size, queries_len, self.n_embd)
+            result = self.out_projection(result)
             # END ASSIGN3_3
 
         return result
@@ -219,7 +235,11 @@ class TransformerLayer(Module):
             self.ln_2 = LayerNorm1d(dim=n_embd, eps=ln_eps, backend=self.backend)
         else:
             # BEGIN ASSIGN3_3
-            raise NotImplementedError
+            # raise NotImplementedError
+            self.gamma1 = Parameter(tensor([1.0] * n_embd, backend=self.backend))
+            self.beta1 = Parameter(tensor([0.0] * n_embd, backend=self.backend))
+            self.gamma2 = Parameter(tensor([1.0] * n_embd, backend=self.backend))
+            self.beta2 = Parameter(tensor([0.0] * n_embd, backend=self.backend))
             # END ASSIGN3_3
 
     def forward(self, x):
@@ -241,7 +261,14 @@ class TransformerLayer(Module):
             return x + ff_out
         else:
             # BEGIN ASSIGN3_3
-            raise NotImplementedError
+            # raise NotImplementedError
+            from .tensor_functions import LayerNorm
+            attn_ln = LayerNorm.apply(x, self.gamma1, self.beta1)
+            attn_out = self.attention(attn_ln)
+            x = x + attn_out
+            ff_ln = LayerNorm.apply(x, self.gamma2, self.beta2)
+            ff_out = self.ff(ff_ln)
+            return x + ff_out
             # END ASSIGN3_3
 
         return x
@@ -314,7 +341,9 @@ class DecoderLM(Module):
             self.ln              = LayerNorm1d(n_embd, eps=ln_eps, backend=backend)
         else:
             # BEGIN ASSIGN3_3
-            raise NotImplementedError
+            # raise NotImplementedError
+            self.gamma_final = Parameter(tensor([1.0] * n_embd, backend=self.backend))
+            self.beta_final = Parameter(tensor([0.0] * n_embd, backend=self.backend))            
             # END ASSIGN3_3
         
     def forward(self, idx):
@@ -351,8 +380,18 @@ class DecoderLM(Module):
             x = self.lm_head(x)
         else:
             # BEGIN ASSIGN3_3
-            raise NotImplementedError
+            # raise NotImplementedError
             # 稍微注意一下上面改动的部分
+            from .tensor_functions import LayerNorm
+            token_embeddings = self.token_embeddings(idx)
+            positional_embeddings = self.position_embeddings(pos)
+            x = self.dropout(token_embeddings + positional_embeddings)
+            x = self.t_layer_1(x)
+            x = self.t_layer_2(x)
+            x = self.t_layer_3(x)
+            x = self.t_layer_4(x)
+            x = LayerNorm.apply(x, self.gamma_final, self.beta_final)
+            x = self.lm_head(x)           
             # END ASSIGN3_3
 
         return x
