@@ -36,7 +36,7 @@ bias: [hidden_size], ln bias
 template <typename T>
 __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
                                const T *scale, const T *bias, int hidden_size) {
-  // 根据gridDim.x和blockDim.x，可知一个block负责一个seq,一个thread负责一个hidden_dimension
+
   
   /// BEGIN ASSIGN3_2
   /// TODO
@@ -53,20 +53,16 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
     float4 val = inp_f4[idx];
     l_sum += val.x + val.y + val.z + val.w;
     l_square_sum += val.x * val.x + val.y * val.y + val.z * val.z + val.w * val.w;
-  } // 问题：当idx=hidden_size-3时，取出来的val时什么，val.x, val,y, val.z, val.w
-  //对这个问题的理解会直接影响到对l_sum和l_square_sum求平均的时候需不需要hidden_size*4
-  // problem solved, 看了一下launch_layernorm里的hidden_dim>>=2, 明白是怎么回事了
+  }
 
   // Step 2
   blockReduce<ReduceType::kSum, 1>(&l_sum);
   blockReduce<ReduceType::kSum, 1>(&l_square_sum);
 
-  // 计算均值和方差
   float mean = l_sum / (hidden_size * 4);
   float var = l_square_sum / (hidden_size * 4) - mean * mean;
-  var = var + LN_EPSILON;  // 添加数值稳定性项
+  var = var + LN_EPSILON;
 
-  // 将结果写入共享内存
   __shared__ float s_mean;
   __shared__ float s_var;
   if (threadIdx.x == 0) {
@@ -90,8 +86,7 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
     float4 val = inp_f4[idx];
     float4 scale_val = scale_f4[idx];
     float4 bias_val = bias_f4[idx];
-    
-    // 计算标准化后的值
+
     float4 res;
     res.x = scale_val.x * (val.x - s_mean) / sqrtf(s_var) + bias_val.x;
     res.y = scale_val.y * (val.y - s_mean) / sqrtf(s_var) + bias_val.y;
@@ -220,25 +215,23 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   cg::thread_block b = cg::this_thread_block();
   cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
   
-  int col = blockIdx.x * blockDim.x + threadIdx.x; //处理第几个hidden size
+  int col = blockIdx.x * blockDim.x + threadIdx.x;
   float sum_dgamma = 0.0f;
   float sum_dbetta = 0.0f;
   
   if (col < width) {
-      for (int row = threadIdx.y; row < rows; row += blockDim.y) { //处理当前hidden size对应的第几行
+      for (int row = threadIdx.y; row < rows; row += blockDim.y) {
           int idx = row * width + col;
           float dout = out_grad[idx];
           float x = inp[idx];
           float xhat;
           
           if (means != nullptr) {
-              // 使用 means 和 vars 计算 xhat
               float mean = means[row];
               float var = vars[row];
               float std = sqrtf(var);
               xhat = (x - mean) / (std + LN_EPSILON);
           } else {
-              // 使用 output 和 beta 计算 xhat
               float be = betta[col];
               float ga = gamma[col];
               xhat = (x - be) / (ga + LN_EPSILON);
@@ -248,8 +241,8 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
           sum_dbetta += dout;
       }
   }
-  
-  // 使用 shfl_down 进行规约，shfl_down是warp级别的操作，现在我们的block是32*32的，所以这里本质上是把一行的线程（一共32个，正好是一个warp）进行规约
+  __syncthreads();
+
   for (int i = g.size() / 2; i > 0; i /= 2) {
       sum_dgamma += g.shfl_down(sum_dgamma, i);
       sum_dbetta += g.shfl_down(sum_dbetta, i);
@@ -319,18 +312,15 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
       float4 dout = out_grad_f4[idx];
       float4 g = gamma_f4[idx];
       float4 x = inp_f4[idx];
-      
-      // 计算 dxhat = dout * gamma
+
       float4 dxhat;
       dxhat.x = dout.x * g.x;
       dxhat.y = dout.y * g.y;
       dxhat.z = dout.z * g.z;
       dxhat.w = dout.w * g.w;
-      
-      // 计算 xhat
+
       float4 xhat;
       if (means != nullptr) {
-          // 使用 means 和 vars 计算 xhat
           float mean = means[blockIdx.x];
           float var = max(vars[blockIdx.x], LN_EPSILON);
           float std = sqrtf(var);
@@ -340,7 +330,6 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
           xhat.z = (x.z - mean) / (std + LN_EPSILON);
           xhat.w = (x.w - mean) / (std + LN_EPSILON);
       } else {
-          // 使用 output 和 beta 计算 xhat
           float4 b = betta_f4[idx];
           
           xhat.x = (x.x - b.x) / (g.x + LN_EPSILON);
@@ -348,19 +337,16 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
           xhat.z = (x.z - b.z) / (g.z + LN_EPSILON);
           xhat.w = (x.w - b.w) / (g.w + LN_EPSILON);
       }
-      
-      // 累加和
+
       dxhat_sum += dxhat.x + dxhat.y + dxhat.z + dxhat.w;
       dxhat_xhat_sum += dxhat.x * xhat.x + dxhat.y * xhat.y + 
                         dxhat.z * xhat.z + dxhat.w * xhat.w;
   }
-  
-  // 规约
-  blockReduce<ReduceType::kSum, 1>(&dxhat_sum); // 将一个block内所有线程的dxhat_sum和dxhat_xhat_sum都加起来
+
+  blockReduce<ReduceType::kSum, 1>(&dxhat_sum);
   blockReduce<ReduceType::kSum, 1>(&dxhat_xhat_sum);
   __syncthreads();
-  
-  // 计算最终梯度
+
   float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad) + blockIdx.x * hidden_dim;
   float m = hidden_dim * 4.0f;
   float var = max(vars[blockIdx.x], LN_EPSILON);
