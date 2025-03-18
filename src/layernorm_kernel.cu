@@ -211,48 +211,132 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   //      -> Now g.shfl_down helps you do so without consuming any shared memory. g.shfl_down makes it more efficient.
   // 4. Assign the final result to the correct position in the global output
 
+  // __shared__ float betta_buffer[TILE_DIM][TILE_DIM];
+  // __shared__ float gamma_buffer[TILE_DIM][TILE_DIM];
   
+  // cg::thread_block b = cg::this_thread_block();
+  // cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
+  
+  // int col = blockIdx.x * blockDim.x + threadIdx.x;
+  // float sum_dgamma = 0.0f;
+  // float sum_dbetta = 0.0f;
+  
+  // if (col < width) {
+  //     for (int row = threadIdx.y; row < rows; row += blockDim.y) {
+  //         int idx = row * width + col;
+  //         float dout = out_grad[idx];
+  //         float x = inp[idx];
+  //         float xhat;
+          
+  //         if (means != nullptr) {
+  //             float mean = means[row];
+  //             float var = vars[row];
+  //             float std = sqrtf(var);
+  //             xhat = (x - mean) / (std + LN_EPSILON);
+  //         } else {
+  //             float be = betta[col];
+  //             float ga = gamma[col];
+  //             xhat = (x - be) / (ga + LN_EPSILON);
+  //         }
+          
+  //         sum_dgamma += dout * xhat;
+  //         sum_dbetta += dout;
+  //     }
+  // }
+
+  // betta_buffer[threadIdx.y][threadIdx.x] = sum_dbetta;
+  // gamma_buffer[threadIdx.y][threadIdx.x] = sum_dgamma;
+  // __syncthreads();
+
+  // if (threadIdx.y == 0) {
+  //     sum_dbetta = 0.0f;
+  //     sum_dgamma = 0.0f;
+  //     for (int i = 0; i < TILE_DIM; i++) {
+  //         sum_dbetta += betta_buffer[i][threadIdx.x];
+  //         sum_dgamma += gamma_buffer[i][threadIdx.x];
+  //     }
+      
+  //     for (int i = g.size() / 2; i > 0; i /= 2) {
+  //         sum_dgamma += g.shfl_down(sum_dgamma, i);
+  //         sum_dbetta += g.shfl_down(sum_dbetta, i);
+  //     }
+      
+  //     if (threadIdx.x == 0 && col < width) {
+  //         gamma_grad[blockIdx.x] = sum_dgamma;
+  //         betta_grad[blockIdx.x] = sum_dbetta;
+  //     }
+  // }
+  __shared__ float betta_buffer[TILE_DIM][TILE_DIM];
+  __shared__ float gamma_buffer[TILE_DIM][TILE_DIM];
+
   cg::thread_block b = cg::this_thread_block();
   cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
-  
-  int col = blockIdx.x * blockDim.x + threadIdx.x;
-  float sum_dgamma = 0.0f;
-  float sum_dbetta = 0.0f;
-  
-  if (col < width) {
-      for (int row = threadIdx.y; row < rows; row += blockDim.y) {
-          int idx = row * width + col;
-          float dout = out_grad[idx];
-          float x = inp[idx];
-          float xhat;
-          
-          if (means != nullptr) {
-              float mean = means[row];
-              float var = vars[row];
-              float std = sqrtf(var);
-              xhat = (x - mean) / (std + LN_EPSILON);
-          } else {
-              float be = betta[col];
-              float ga = gamma[col];
-              xhat = (x - be) / (ga + LN_EPSILON);
-          }
-          
-          sum_dgamma += dout * xhat;
-          sum_dbetta += dout;
+
+  int idx = blockDim.x * blockIdx.x + threadIdx.x;
+  int offset = threadIdx.y * width + idx;
+  int y_stride = width * TILE_DIM;
+
+  // Loop across inp height
+  float dbetta = 0;
+  float dgamma = 0;
+  float dout, val, xhat;
+
+  if (idx < width) {
+    if (means == nullptr) {
+      float vbetta = (float)betta[idx];
+      float vgamma = (float)gamma[idx];
+      for (int r = threadIdx.y; r < rows; r += TILE_DIM) {
+        dout = (float)out_grad[offset];
+        // inp is output when means is nullptr
+        val = (float)inp[offset];
+        dbetta += dout;
+        xhat = (val - vbetta) / (vgamma + LN_EPSILON);
+        dgamma += xhat * dout;
+        offset += y_stride;
       }
+    } else {
+      for (int r = threadIdx.y; r < rows; r += TILE_DIM) {
+        dout = (float)out_grad[offset];
+        // inp is input when means is not nullptr
+        val = (float)inp[offset];
+        float mean = (float)means[r];
+        float var = (float)vars[r];
+        float std = sqrtf(var + LN_EPSILON);
+        xhat = (val - mean) / std;
+        dbetta += dout;
+        dgamma += xhat * dout;
+        offset += y_stride;
+      }
+    }
   }
+
+  // Save to shared memory buffer
+  betta_buffer[threadIdx.y][threadIdx.x] = dbetta;
+  gamma_buffer[threadIdx.y][threadIdx.x] = dgamma;
   __syncthreads();
 
-  for (int i = g.size() / 2; i > 0; i /= 2) {
-      sum_dgamma += g.shfl_down(sum_dgamma, i);
-      sum_dbetta += g.shfl_down(sum_dbetta, i);
-  }
-  
-  if (threadIdx.y == 0 && col < width) {
-      gamma_grad[col] = sum_dgamma;
-      betta_grad[col] = sum_dbetta;
-  }
+  // Transpose for better memory access patterns in reduction
+  float s1 = betta_buffer[threadIdx.x][threadIdx.y];
+  float s2 = gamma_buffer[threadIdx.x][threadIdx.y];
+  __syncthreads(); //为了让同一列的数据可以在同一个warp内规约
+  // warp是按照threadIdx.x来划分的
+  //第一个warp包含threadIdx.x=0 to 31且threadIdx.y = 0的所有线程
+  //第二个warp包含threadIdx.x=0 to 31且threadIdx.y = 1的所有线程
+  //我们实际想要做的是对于同一个threadIdx.x，不同threadIdx.y的值进行规约
 
+  // Warp-level reduction using shfl_down
+  for (int i = 1; i < TILE_DIM; i <<= 1) {
+    s1 += g.shfl_down(s1, i);
+    s2 += g.shfl_down(s2, i);
+  }
+  // 通过一个巧妙的读取方式模拟了转置的效果
+
+  // Write results to global memory
+  int pos = blockIdx.x * TILE_DIM + threadIdx.y;
+  if (threadIdx.x == 0 && pos < width) {
+    betta_grad[pos] = s1;
+    gamma_grad[pos] = s2;
+  }
   // assert(false && "Not Implemented");
   /// END ASSIGN3_2
 }
@@ -300,87 +384,166 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   // 3. Compute reduce sum for dxhat and dxhat*xhat with blockReduce
   // 4. Compute final gradient
   
-  float dxhat_sum = 0.0f;
-  float dxhat_xhat_sum = 0.0f;
+  // float dxhat_sum = 0.0f;
+  // float dxhat_xhat_sum = 0.0f;
   
-  const float4 *out_grad_f4 = reinterpret_cast<const float4 *>(out_grad) + blockIdx.x * hidden_dim;
-  const float4 *gamma_f4 = reinterpret_cast<const float4 *>(gamma);
-  const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp) + blockIdx.x * hidden_dim;
-  const float4 *betta_f4 = reinterpret_cast<const float4 *>(betta);
+  // const float4 *out_grad_f4 = reinterpret_cast<const float4 *>(out_grad) + blockIdx.x * hidden_dim;
+  // const float4 *gamma_f4 = reinterpret_cast<const float4 *>(gamma);
+  // const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp) + blockIdx.x * hidden_dim;
+  // const float4 *betta_f4 = reinterpret_cast<const float4 *>(betta);
   
-  for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
-      float4 dout = out_grad_f4[idx];
-      float4 g = gamma_f4[idx];
-      float4 x = inp_f4[idx];
+  // for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
+  //     float4 dout = out_grad_f4[idx];
+  //     float4 g = gamma_f4[idx];
+  //     float4 x = inp_f4[idx];
 
-      float4 dxhat;
-      dxhat.x = dout.x * g.x;
-      dxhat.y = dout.y * g.y;
-      dxhat.z = dout.z * g.z;
-      dxhat.w = dout.w * g.w;
+  //     float4 dxhat;
+  //     dxhat.x = dout.x * g.x;
+  //     dxhat.y = dout.y * g.y;
+  //     dxhat.z = dout.z * g.z;
+  //     dxhat.w = dout.w * g.w;
 
-      float4 xhat;
-      if (means != nullptr) {
-          float mean = means[blockIdx.x];
-          float var = max(vars[blockIdx.x], LN_EPSILON);
-          float std = sqrtf(var);
+  //     float4 xhat;
+  //     if (means != nullptr) {
+  //         float mean = means[blockIdx.x];
+  //         float var = max(vars[blockIdx.x], LN_EPSILON);
+  //         float std = sqrtf(var);
           
-          xhat.x = (x.x - mean) / (std + LN_EPSILON);
-          xhat.y = (x.y - mean) / (std + LN_EPSILON);
-          xhat.z = (x.z - mean) / (std + LN_EPSILON);
-          xhat.w = (x.w - mean) / (std + LN_EPSILON);
-      } else {
-          float4 b = betta_f4[idx];
+  //         xhat.x = (x.x - mean) / (std + LN_EPSILON);
+  //         xhat.y = (x.y - mean) / (std + LN_EPSILON);
+  //         xhat.z = (x.z - mean) / (std + LN_EPSILON);
+  //         xhat.w = (x.w - mean) / (std + LN_EPSILON);
+  //     } else {
+  //         float4 b = betta_f4[idx];
           
-          xhat.x = (x.x - b.x) / (g.x + LN_EPSILON);
-          xhat.y = (x.y - b.y) / (g.y + LN_EPSILON);
-          xhat.z = (x.z - b.z) / (g.z + LN_EPSILON);
-          xhat.w = (x.w - b.w) / (g.w + LN_EPSILON);
-      }
+  //         xhat.x = (x.x - b.x) / (g.x + LN_EPSILON);
+  //         xhat.y = (x.y - b.y) / (g.y + LN_EPSILON);
+  //         xhat.z = (x.z - b.z) / (g.z + LN_EPSILON);
+  //         xhat.w = (x.w - b.w) / (g.w + LN_EPSILON);
+  //     }
 
-      dxhat_sum += dxhat.x + dxhat.y + dxhat.z + dxhat.w;
-      dxhat_xhat_sum += dxhat.x * xhat.x + dxhat.y * xhat.y + 
-                        dxhat.z * xhat.z + dxhat.w * xhat.w;
+  //     dxhat_sum += dxhat.x + dxhat.y + dxhat.z + dxhat.w;
+  //     dxhat_xhat_sum += dxhat.x * xhat.x + dxhat.y * xhat.y + 
+  //                       dxhat.z * xhat.z + dxhat.w * xhat.w;
+  // }
+
+  // blockReduce<ReduceType::kSum, 1>(&dxhat_sum);
+  // blockReduce<ReduceType::kSum, 1>(&dxhat_xhat_sum);
+  // __syncthreads();
+
+  // float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad) + blockIdx.x * hidden_dim;
+  // float m = hidden_dim * 4.0f;
+  // float var = max(vars[blockIdx.x], LN_EPSILON);
+  // float std = sqrtf(var);
+  
+  // for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
+  //     float4 dout = out_grad_f4[idx];
+  //     float4 g = gamma_f4[idx];
+  //     float4 x = inp_f4[idx];
+
+  //     float4 xhat;
+  //     if (means != nullptr) {
+  //         float mean = means[blockIdx.x];
+  //         xhat.x = (x.x - mean) / (std + LN_EPSILON);
+  //         xhat.y = (x.y - mean) / (std + LN_EPSILON);
+  //         xhat.z = (x.z - mean) / (std + LN_EPSILON);
+  //         xhat.w = (x.w - mean) / (std + LN_EPSILON);
+  //     } else {
+  //         float4 b = betta_f4[idx];
+          
+  //         xhat.x = (x.x - b.x) / (g.x + LN_EPSILON);
+  //         xhat.y = (x.y - b.y) / (g.y + LN_EPSILON);
+  //         xhat.z = (x.z - b.z) / (g.z + LN_EPSILON);
+  //         xhat.w = (x.w - b.w) / (g.w + LN_EPSILON);
+  //     }
+      
+  //     float4 dx;
+  //     dx.x = (dout.x * g.x - (dxhat_sum + xhat.x * dxhat_xhat_sum) / m) / std;
+  //     dx.y = (dout.y * g.y - (dxhat_sum + xhat.y * dxhat_xhat_sum) / m) / std;
+  //     dx.z = (dout.z * g.z - (dxhat_sum + xhat.z * dxhat_xhat_sum) / m) / std;
+  //     dx.w = (dout.w * g.w - (dxhat_sum + xhat.w * dxhat_xhat_sum) / m) / std;
+      
+  //     inp_grad_f4[idx] = dx;
+  // }
+
+  // 计算偏移量，用于访问全局内存
+  int offset = blockIdx.x * hidden_dim + threadIdx.x;
+  
+  // 用于存储dxhat和xhat的局部变量
+  float4 dxhat, xhat;
+  float var_rsqrt;
+  
+  if (threadIdx.x < hidden_dim) {
+    // 步骤1: 计算dxhat = dout * gamma
+    const float4 *out_grad_f4 = reinterpret_cast<const float4 *>(out_grad);
+    const float4 *gamma_f4 = reinterpret_cast<const float4 *>(gamma);
+    const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp);
+    
+    dxhat = out_grad_f4[offset];
+    float4 g = gamma_f4[threadIdx.x];
+    dxhat.x *= g.x;
+    dxhat.y *= g.y;
+    dxhat.z *= g.z;
+    dxhat.w *= g.w;
+    
+    // 步骤2: 计算xhat
+    // xhat = (input - mean) * rsqrt(var) 或 (output - betta) / gamma
+    xhat = inp_f4[offset];
+    var_rsqrt = rsqrtf((float)vars[blockIdx.x] + LN_EPSILON);
+    
+    if (means == nullptr) {
+      // inp是output，计算xhat = (output - betta) / gamma
+      const float4 *betta_f4 = reinterpret_cast<const float4 *>(betta);
+      float4 b = betta_f4[threadIdx.x];
+      
+      xhat.x = (xhat.x - b.x) / (g.x + LN_EPSILON);
+      xhat.y = (xhat.y - b.y) / (g.y + LN_EPSILON);
+      xhat.z = (xhat.z - b.z) / (g.z + LN_EPSILON);
+      xhat.w = (xhat.w - b.w) / (g.w + LN_EPSILON);
+    } else {
+      // inp是input，计算xhat = (input - mean) * rsqrt(var)
+      float mean = (float)means[blockIdx.x];
+      
+      xhat.x = (xhat.x - mean) * var_rsqrt;
+      xhat.y = (xhat.y - mean) * var_rsqrt;
+      xhat.z = (xhat.z - mean) * var_rsqrt;
+      xhat.w = (xhat.w - mean) * var_rsqrt;
+    }
   }
-
-  blockReduce<ReduceType::kSum, 1>(&dxhat_sum);
-  blockReduce<ReduceType::kSum, 1>(&dxhat_xhat_sum);
+  
+  // 步骤3: 计算规约和 - dxhat和dxhat*xhat
+  float reduce_val[2] = {0.0f, 0.0f};
+  if (threadIdx.x < hidden_dim) {
+    reduce_val[0] = dxhat.x + dxhat.y + dxhat.z + dxhat.w;
+    reduce_val[1] = dxhat.x * xhat.x + dxhat.y * xhat.y + 
+                    dxhat.z * xhat.z + dxhat.w * xhat.w;
+  }
+  
+  // 使用blockReduce进行规约
+  blockReduce<ReduceType::kSum, 2>(reduce_val);
+  
+  // 将规约结果存储在共享内存中
+  __shared__ float s_sum_dxhat, s_sum_dxhat_xhat;
+  if (threadIdx.x == 0) {
+    float mean_dim = hidden_dim * 4.0f;
+    s_sum_dxhat = reduce_val[0] / mean_dim;
+    s_sum_dxhat_xhat = reduce_val[1] / mean_dim;
+  }
   __syncthreads();
-
-  float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad) + blockIdx.x * hidden_dim;
-  float m = hidden_dim * 4.0f;
-  float var = max(vars[blockIdx.x], LN_EPSILON);
-  float std = sqrtf(var);
   
-  for (uint idx = threadIdx.x; idx < hidden_dim; idx += blockDim.x) {
-      float4 dout = out_grad_f4[idx];
-      float4 g = gamma_f4[idx];
-      float4 x = inp_f4[idx];
-
-      float4 xhat;
-      if (means != nullptr) {
-          float mean = means[blockIdx.x];
-          xhat.x = (x.x - mean) / (std + LN_EPSILON);
-          xhat.y = (x.y - mean) / (std + LN_EPSILON);
-          xhat.z = (x.z - mean) / (std + LN_EPSILON);
-          xhat.w = (x.w - mean) / (std + LN_EPSILON);
-      } else {
-          float4 b = betta_f4[idx];
-          
-          xhat.x = (x.x - b.x) / (g.x + LN_EPSILON);
-          xhat.y = (x.y - b.y) / (g.y + LN_EPSILON);
-          xhat.z = (x.z - b.z) / (g.z + LN_EPSILON);
-          xhat.w = (x.w - b.w) / (g.w + LN_EPSILON);
-      }
-      
-      float4 dx;
-      dx.x = (dout.x * g.x - (dxhat_sum + xhat.x * dxhat_xhat_sum) / m) / std;
-      dx.y = (dout.y * g.y - (dxhat_sum + xhat.y * dxhat_xhat_sum) / m) / std;
-      dx.z = (dout.z * g.z - (dxhat_sum + xhat.z * dxhat_xhat_sum) / m) / std;
-      dx.w = (dout.w * g.w - (dxhat_sum + xhat.w * dxhat_xhat_sum) / m) / std;
-      
-      inp_grad_f4[idx] = dx;
+  // 步骤4: 计算最终的梯度
+  if (threadIdx.x >= hidden_dim) {
+    return;
   }
+  
+  dxhat.x = (dxhat.x - s_sum_dxhat - xhat.x * s_sum_dxhat_xhat) * var_rsqrt;
+  dxhat.y = (dxhat.y - s_sum_dxhat - xhat.y * s_sum_dxhat_xhat) * var_rsqrt;
+  dxhat.z = (dxhat.z - s_sum_dxhat - xhat.z * s_sum_dxhat_xhat) * var_rsqrt;
+  dxhat.w = (dxhat.w - s_sum_dxhat - xhat.w * s_sum_dxhat_xhat) * var_rsqrt;
+  
+  // 将结果写回全局内存
+  float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad);
+  inp_grad_f4[offset] = dxhat;
 
   // assert(false && "Not Implemented");
   /// END ASSIGN3_2
