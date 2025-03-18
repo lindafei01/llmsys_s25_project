@@ -12,6 +12,10 @@ namespace cuda {
 const float LN_EPSILON = 1e-8f;
 #define TILE_DIM 32
 
+template <typename T>
+__forceinline__ __device__ T add_eps(T x) {
+  return fabsf(x) > LN_EPSILON ? x : (x < 0 ? -LN_EPSILON : LN_EPSILON);
+}
 
 /**
 @brief: ker_layer_norm
@@ -56,44 +60,33 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   }
 
   // Step 2
-  blockReduce<ReduceType::kSum, 1>(&l_sum);
-  blockReduce<ReduceType::kSum, 1>(&l_square_sum);
+  float mean_dim = float(hidden_size) * 4.f;
+  float reduce_val[2] = {l_sum, l_square_sum};
+  blockReduce<ReduceType::kSum, 2>(reduce_val);
 
-  float mean = l_sum / (hidden_size * 4);
-  float var = l_square_sum / (hidden_size * 4) - mean * mean;
-  var = var + LN_EPSILON;
-
-  __shared__ float s_mean;
-  __shared__ float s_var;
+   __shared__ float s_mean, s_var;
   if (threadIdx.x == 0) {
-    s_mean = mean;
-    s_var = var;
+    s_mean = reduce_val[0] / mean_dim;
     if (means != nullptr) {
-      means[blockIdx.x] = mean;
+      means[blockIdx.x] = s_mean;
     }
-    if (vars != nullptr) {
-      vars[blockIdx.x] = var;
-    }
+    s_var = reduce_val[1] / mean_dim - s_mean * s_mean + LN_EPSILON;
+    vars[blockIdx.x] = s_var;
+    s_var = rsqrtf(s_var);
   }
   __syncthreads();
 
-  // Step 3
-  float4 *res_f4 = reinterpret_cast<float4 *>(ln_res) + blockIdx.x * hidden_size;
-  const float4 *scale_f4 = reinterpret_cast<const float4 *>(scale);
-  const float4 *bias_f4 = reinterpret_cast<const float4 *>(bias);
-  
+  float4 *output_f4 =
+      reinterpret_cast<float4 *>(ln_res) + blockIdx.x * hidden_size;
   for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    float4 vscale = __ldg(reinterpret_cast<const float4 *>(scale) + idx);
+    float4 vbias = __ldg(reinterpret_cast<const float4 *>(bias) + idx);
     float4 val = inp_f4[idx];
-    float4 scale_val = scale_f4[idx];
-    float4 bias_val = bias_f4[idx];
-
-    float4 res;
-    res.x = scale_val.x * (val.x - s_mean) / sqrtf(s_var) + bias_val.x;
-    res.y = scale_val.y * (val.y - s_mean) / sqrtf(s_var) + bias_val.y;
-    res.z = scale_val.z * (val.z - s_mean) / sqrtf(s_var) + bias_val.z;
-    res.w = scale_val.w * (val.w - s_mean) / sqrtf(s_var) + bias_val.w;
-    
-    res_f4[idx] = res;
+    val.x = (val.x - s_mean) * s_var * vscale.x + vbias.x;
+    val.y = (val.y - s_mean) * s_var * vscale.y + vbias.y;
+    val.z = (val.z - s_mean) * s_var * vscale.z + vbias.z;
+    val.w = (val.w - s_mean) * s_var * vscale.w + vbias.w;
+    output_f4[idx] = val;
   }
   // assert(false && "Not Implemented");
   /// END ASSIGN3_2
@@ -279,7 +272,7 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   // Loop across inp height
   float dbetta = 0;
   float dgamma = 0;
-  float dout, val, xhat;
+  float dout, val;
 
   if (idx < width) {
     if (means == nullptr) {
@@ -290,8 +283,7 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
         // inp is output when means is nullptr
         val = (float)inp[offset];
         dbetta += dout;
-        xhat = (val - vbetta) / (vgamma + LN_EPSILON);
-        dgamma += xhat * dout;
+        dgamma += ((val - vbetta) / add_eps(vgamma) * dout);
         offset += y_stride;
       }
     } else {
@@ -299,25 +291,22 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
         dout = (float)out_grad[offset];
         // inp is input when means is not nullptr
         val = (float)inp[offset];
-        float mean = (float)means[r];
-        float var = (float)vars[r];
-        float std = sqrtf(var + LN_EPSILON);
-        xhat = (val - mean) / std;
         dbetta += dout;
-        dgamma += xhat * dout;
+        dgamma += ((val - (float)means[r]) *
+                   rsqrtf((float)vars[r] + LN_EPSILON) * dout);
         offset += y_stride;
       }
     }
   }
 
   // Save to shared memory buffer
-  betta_buffer[threadIdx.y][threadIdx.x] = dbetta;
-  gamma_buffer[threadIdx.y][threadIdx.x] = dgamma;
+  betta_buffer[threadIdx.x][threadIdx.y] = dbetta;
+  gamma_buffer[threadIdx.x][threadIdx.y] = dgamma;
   __syncthreads();
 
   // Transpose for better memory access patterns in reduction
-  float s1 = betta_buffer[threadIdx.x][threadIdx.y];
-  float s2 = gamma_buffer[threadIdx.x][threadIdx.y];
+  float s1 = betta_buffer[threadIdx.y][threadIdx.x];
+  float s2 = gamma_buffer[threadIdx.y][threadIdx.x];
   __syncthreads(); //为了让同一列的数据可以在同一个warp内规约
   // warp是按照threadIdx.x来划分的
   //第一个warp包含threadIdx.x=0 to 31且threadIdx.y = 0的所有线程
@@ -333,7 +322,7 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
 
   // Write results to global memory
   int pos = blockIdx.x * TILE_DIM + threadIdx.y;
-  if (threadIdx.x == 0 && pos < width) {
+  if (threadIdx.x == 0 && idx < width) {
     betta_grad[pos] = s1;
     gamma_grad[pos] = s2;
   }
@@ -466,72 +455,60 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   //     inp_grad_f4[idx] = dx;
   // }
 
-  // 计算偏移量，用于访问全局内存
   int offset = blockIdx.x * hidden_dim + threadIdx.x;
   
-  // 用于存储dxhat和xhat的局部变量
   float4 dxhat, xhat;
   float var_rsqrt;
   
   if (threadIdx.x < hidden_dim) {
-    // 步骤1: 计算dxhat = dout * gamma
-    const float4 *out_grad_f4 = reinterpret_cast<const float4 *>(out_grad);
-    const float4 *gamma_f4 = reinterpret_cast<const float4 *>(gamma);
-    const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp);
+
+    dxhat = ((const float4 *)out_grad)[offset];
+    float4 vgamma = ((const float4 *)gamma)[threadIdx.x];
+    dxhat.x *= vgamma.x;
+    dxhat.y *= vgamma.y;
+    dxhat.z *= vgamma.z;
+    dxhat.w *= vgamma.w;
     
-    dxhat = out_grad_f4[offset];
-    float4 g = gamma_f4[threadIdx.x];
-    dxhat.x *= g.x;
-    dxhat.y *= g.y;
-    dxhat.z *= g.z;
-    dxhat.w *= g.w;
-    
-    // 步骤2: 计算xhat
     // xhat = (input - mean) * rsqrt(var) 或 (output - betta) / gamma
-    xhat = inp_f4[offset];
+    xhat = ((const float4 *)inp)[offset];
     var_rsqrt = rsqrtf((float)vars[blockIdx.x] + LN_EPSILON);
     
     if (means == nullptr) {
       // inp是output，计算xhat = (output - betta) / gamma
-      const float4 *betta_f4 = reinterpret_cast<const float4 *>(betta);
-      float4 b = betta_f4[threadIdx.x];
-      
-      xhat.x = (xhat.x - b.x) / (g.x + LN_EPSILON);
-      xhat.y = (xhat.y - b.y) / (g.y + LN_EPSILON);
-      xhat.z = (xhat.z - b.z) / (g.z + LN_EPSILON);
-      xhat.w = (xhat.w - b.w) / (g.w + LN_EPSILON);
+      float4 vbetta = ((const float4 *)betta)[threadIdx.x];
+      xhat.x = (xhat.x - vbetta.x) / add_eps(vgamma.x);
+      xhat.y = (xhat.y - vbetta.y) / add_eps(vgamma.y);
+      xhat.z = (xhat.z - vbetta.z) / add_eps(vgamma.z);
+      xhat.w = (xhat.w - vbetta.w) / add_eps(vgamma.w);
     } else {
       // inp是input，计算xhat = (input - mean) * rsqrt(var)
-      float mean = (float)means[blockIdx.x];
+      float fmean = (float)means[blockIdx.x];
       
-      xhat.x = (xhat.x - mean) * var_rsqrt;
-      xhat.y = (xhat.y - mean) * var_rsqrt;
-      xhat.z = (xhat.z - mean) * var_rsqrt;
-      xhat.w = (xhat.w - mean) * var_rsqrt;
+      xhat.x = (xhat.x - fmean) * var_rsqrt;
+      xhat.y = (xhat.y - fmean) * var_rsqrt;
+      xhat.z = (xhat.z - fmean) * var_rsqrt;
+      xhat.w = (xhat.w - fmean) * var_rsqrt;
     }
   }
   
-  // 步骤3: 计算规约和 - dxhat和dxhat*xhat
-  float reduce_val[2] = {0.0f, 0.0f};
+  float reduce_val[2] = {0.f, 0.f};
   if (threadIdx.x < hidden_dim) {
     reduce_val[0] = dxhat.x + dxhat.y + dxhat.z + dxhat.w;
     reduce_val[1] = dxhat.x * xhat.x + dxhat.y * xhat.y + 
                     dxhat.z * xhat.z + dxhat.w * xhat.w;
   }
   
-  // 使用blockReduce进行规约
   blockReduce<ReduceType::kSum, 2>(reduce_val);
   
-  // 将规约结果存储在共享内存中
   __shared__ float s_sum_dxhat, s_sum_dxhat_xhat;
   if (threadIdx.x == 0) {
-    float mean_dim = hidden_dim * 4.0f;
+    float mean_dim = hidden_dim * 4;
     s_sum_dxhat = reduce_val[0] / mean_dim;
     s_sum_dxhat_xhat = reduce_val[1] / mean_dim;
   }
   __syncthreads();
   
-  // 步骤4: 计算最终的梯度
+
   if (threadIdx.x >= hidden_dim) {
     return;
   }
@@ -540,10 +517,8 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   dxhat.y = (dxhat.y - s_sum_dxhat - xhat.y * s_sum_dxhat_xhat) * var_rsqrt;
   dxhat.z = (dxhat.z - s_sum_dxhat - xhat.z * s_sum_dxhat_xhat) * var_rsqrt;
   dxhat.w = (dxhat.w - s_sum_dxhat - xhat.w * s_sum_dxhat_xhat) * var_rsqrt;
-  
-  // 将结果写回全局内存
-  float4 *inp_grad_f4 = reinterpret_cast<float4 *>(inp_grad);
-  inp_grad_f4[offset] = dxhat;
+
+  ((float4 *)inp_grad)[offset] = dxhat;
 
   // assert(false && "Not Implemented");
   /// END ASSIGN3_2
