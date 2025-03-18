@@ -443,7 +443,7 @@ class CudaKernelOps(TensorOps):
     #   raise("Not implemented")
         # 获取输入维度
         batch_size = inp.shape[0]
-        hidden_dim = inp.shape[-1]
+        hidden_dim = inp.shape[1]
         
         # 获取CUDA流
         stream = torch.cuda.current_stream().cuda_stream
@@ -491,7 +491,7 @@ class CudaKernelOps(TensorOps):
     #   raise("Not implemented")
         # 获取维度
         batch_size = out_grad.shape[0]
-        hidden_dim = out_grad.shape[-1]
+        hidden_dim = out_grad.shape[1]
         
         # 获取CUDA流
         stream_1 = torch.cuda.current_stream().cuda_stream

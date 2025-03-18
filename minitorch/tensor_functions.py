@@ -479,18 +479,22 @@ class LayerNorm(Function):
     #   raise NotImplementedError("Need to implement for Assignment 3")
         # 获取前向传播保存的值
         inp, gamma, beta = ctx.saved_values
-        
+
         # 计算均值和方差
         batch_size = inp.shape[0]
-        hidden_dim = inp.shape[-1]
-        mean = inp.sum(dim=-1).view(batch_size, 1) / hidden_dim
-        var = ((inp - mean) ** 2).sum(dim=-1).view(batch_size, 1) / hidden_dim
-        
+        hidden_dim = inp.shape[1]
+
+        # 计算均值 - 确保是一维数组
+        mean = inp.sum(dim=1) / hidden_dim  # 形状为 (batch_size,)
+
+        # 计算方差 - 确保是一维数组
+        var = ((inp - mean.view(batch_size, 1)) ** 2).sum(dim=1) / hidden_dim
+
         # 调用CUDA核函数计算梯度
         inp_grad, gamma_grad, beta_grad = out_grad.f.layernorm_bw(
-            out_grad, inp, gamma, beta, var, mean
+          out_grad, inp, gamma, beta, var, mean
         )
-        
+
         return inp_grad, gamma_grad, beta_grad
       #   END ASSIGN3_2
 
