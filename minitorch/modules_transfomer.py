@@ -263,10 +263,14 @@ class TransformerLayer(Module):
             # BEGIN ASSIGN3_3
             # raise NotImplementedError
             from .tensor_functions import LayerNorm
-            attn_ln = LayerNorm.apply(x, self.gamma1, self.beta1)
+            reshaped_x = x.view(batch_size * seq_len, x_dim)
+            attn_ln = LayerNorm.apply(reshaped_x, self.gamma1.value, self.beta1.value)
+            attn_ln = attn_ln.view(batch_size, seq_len, x_dim)
             attn_out = self.attention(attn_ln)
             x = x + attn_out
-            ff_ln = LayerNorm.apply(x, self.gamma2, self.beta2)
+            reshaped_x = x.view(batch_size * seq_len, x_dim)
+            ff_ln = LayerNorm.apply(reshaped_x, self.gamma2.value, self.beta2.value)
+            ff_ln = ff_ln.view(batch_size, seq_len, x_dim)
             ff_out = self.ff(ff_ln)
             return x + ff_out
             # END ASSIGN3_3
@@ -390,7 +394,10 @@ class DecoderLM(Module):
             x = self.t_layer_2(x)
             x = self.t_layer_3(x)
             x = self.t_layer_4(x)
-            x = LayerNorm.apply(x, self.gamma_final, self.beta_final)
+            
+            reshaped_x = x.view(batch_size * seq_len, self.n_embd)
+            normalized_x = LayerNorm.apply(reshaped_x, self.gamma_final.value, self.beta_final.value)
+            x = normalized_x.view(batch_size, seq_len, self.n_embd)
             x = self.lm_head(x)           
             # END ASSIGN3_3
 

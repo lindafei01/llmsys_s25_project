@@ -44,6 +44,36 @@ def get_dataset(dataset_name, model_max_length):
 
     return dataset, src_key, tgt_key
 
+# def get_dataset(data_dir="./data/iwslt14", model_max_length=512):
+#     """
+#     load IWSLT (de-en) dataset locally
+#     """
+#     dataset = {}
+#     for split in ['train', 'validation', 'test']:
+#         file_path = os.path.join(data_dir, f"{split}.json")
+#         with open(file_path, 'r', encoding='utf-8') as f:
+#             print(file_path)
+#             dataset[split] = json.load(f)
+#
+#     src_key, tgt_key = 'de', 'en'
+#
+#     dataset_split = {'train':[], 'validation':[], 'test':[]}
+#     for split in dataset.keys():
+#         for example in dataset[split]:
+#             try:
+#                 if len(example[src_key].split()) + len(example[tgt_key].split()) < model_max_length:
+#                     dataset_split[split].append(example)
+#             except:
+#                 pass
+#
+#
+#     dataset_split['test'] = dataset_split['test'][:100]
+#
+#     print(json.dumps(
+#         {'data_size': {split: len(dataset_split[split]) for split in dataset_split.keys()}},
+#         indent=4))
+#
+#     return dataset_split, src_key, tgt_key
 
 def get_tokenizer(examples, vocab_size, src_key, tgt_key, workdir):
     """
@@ -126,9 +156,9 @@ def collate_batch(
         example_token_ids = token_ids_src + token_ids_tgt
         example_tgt_token_mask = (
                 [0] * len(token_ids_src) + [1] * len(token_ids_tgt))
-        example_token_ids = example_token_ids[:max_length]
-        example_tgt_token_mask = example_tgt_token_mask[:max_length]
-        pad_ids = [pad_token_id] * (max_length - len(example_token_ids))
+        example_token_ids = example_token_ids[:model_max_length]
+        example_tgt_token_mask = example_tgt_token_mask[:model_max_length]
+        pad_ids = [pad_token_id] * (model_max_length - len(example_token_ids))
 
         token_ids.append(example_token_ids + pad_ids)
         tgt_token_mask.append(example_tgt_token_mask + [0] * len(pad_ids))
@@ -272,6 +302,9 @@ def main(dataset_name='bbaaaa/iwslt14-de-en-preprocess',
 
     dataset, src_key, tgt_key = get_dataset(
         dataset_name=dataset_name, model_max_length=model_max_length)
+
+    # dataset, src_key, tgt_key = get_dataset(
+    #     data_dir="./data/iwslt14", model_max_length=model_max_length) # load local dataset
 
     tokenizer = get_tokenizer(
         examples=dataset['train'],

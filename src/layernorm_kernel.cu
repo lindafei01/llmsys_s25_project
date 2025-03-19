@@ -98,6 +98,10 @@ void launch_layernorm(float *ln_res, float *vars, float *means,
                               const float *bias, int batch_size, int hidden_dim,
                               cudaStream_t stream) {
   if (hidden_dim % 4 != 0) {
+    fprintf(stderr, "Error: layernorm hidden_dim (%d) is not divisible by 4\n", hidden_dim);
+    printf("Error: layernorm hidden_dim (%d) is not divisible by 4\n", hidden_dim);
+    fflush(stderr);
+    fflush(stdout);
     throw std::runtime_error("violate hidden_dim % 4 = 0");
   }
   int float_size = sizeof(float);
