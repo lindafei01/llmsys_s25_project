@@ -709,3 +709,60 @@ def grad_check(f: Any, *vals: Tensor, tol=1e-6) -> None:
             1e-2,
             err_msg=err_msg % (f, vals, x.grad[ind], i, ind, check),
         )
+
+
+class FlashAttention(Function):
+    @staticmethod
+    def forward(ctx: Context, q: Tensor, k: Tensor, v: Tensor, causal_mask: bool = False, sm_scale: float = None) -> Tensor:
+        """
+        FlashAttention forward pass.
+        
+        Args:
+            ctx: Context for saving intermediate results
+            q: Query tensor of shape [batch_size, n_heads, seq_len, head_dim]
+            k: Key tensor of shape [batch_size, n_heads, seq_len, head_dim]
+            v: Value tensor of shape [batch_size, n_heads, seq_len, head_dim]
+            causal_mask: Whether to use causal masking
+            sm_scale: Softmax scaling factor (if None, use 1/sqrt(head_dim))
+            
+        Returns:
+            output: Attention output of shape [batch_size, n_heads, seq_len, head_dim]
+        """
+        # Save inputs for backward pass
+        ctx.save_for_backward(q, k, v)
+        ctx.causal_mask = causal_mask
+        
+        # Calculate scale factor if not provided
+        if sm_scale is None:
+            head_dim = q.shape[-1]
+            sm_scale = 1.0 / (head_dim ** 0.5)
+        ctx.sm_scale = sm_scale
+        
+        # Call the core FlashAttention implementation (to be implemented by your teammates)
+        # This is just a placeholder - your teammates will implement the actual function
+        output = flash_attention_forward(q, k, v, causal_mask, sm_scale)
+        
+        return output
+
+    @staticmethod
+    def backward(ctx: Context, grad_output: Tensor) -> Tuple[Tensor, Tensor, Tensor, None, None]:
+        """
+        FlashAttention backward pass.
+        
+        Args:
+            ctx: Context with saved values from forward pass
+            grad_output: Gradient of the loss with respect to the output
+            
+        Returns:
+            Tuple of gradients: (dq, dk, dv, None, None)
+        """
+        q, k, v = ctx.saved_values
+        causal_mask = ctx.causal_mask
+        sm_scale = ctx.sm_scale
+        
+        # Call the core FlashAttention backward implementation (to be implemented by your teammates)
+        # This is just a placeholder - your teammates will implement the actual function
+        dq, dk, dv = flash_attention_backward(grad_output, q, k, v, causal_mask, sm_scale)
+        
+        # Return gradients for q, k, v, and None for the other arguments (causal_mask and sm_scale)
+        return dq, dk, dv, None, None

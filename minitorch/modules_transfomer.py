@@ -14,6 +14,7 @@ from .nn import (
     dropout,
     GELU,
 )
+from .tensor_functions import Attn_Softmax, LayerNorm, FlashAttention
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 datatype = np.float32
@@ -81,6 +82,67 @@ class MultiHeadAttention(Module):
         
         return q, kT, v
 
+    # def self_attention(self, q, kT, v):
+    #     """Given q, kT, and v of sizes defined above, return the result of MultiHeadAttention as described in the writeup
+    #     softmax((q @ kT) / sqrt(attn_hidden_dim)) @ V.
+    #     NOTE: We have added support for Batch Matrix Multiplication with 4 dimensions.
+    #     This means given tensors A of shape (a, b, m, n) and B of shape (a, b, n, p), 
+    #     A @ B will be of the shape (a, b, m, p). Take a moment to consider why we need it.
+
+    #     Args:
+    #         q  : Queries Tensor of shape (batch_size x num_heads x seq_len x attn_hidden_dim)
+    #         kT : Keys Tensor of shape (batch_size x num_heads x attn_hidden_dim x seq_len)
+    #         v  : Values Tensor of shape (batch_size x num_heads x seq_len x attn_hidden_dim)
+
+    #     Returns:
+    #         output : Tensor of shape (batch_size, seq_len, n_embd)
+    #     """
+    #     batch_size, num_head, queries_len, q_dim = q.shape
+    #     _, _, k_dim, _ = kT.shape
+    #     _, _, _, v_dim = v.shape
+    #     assert q_dim == k_dim == v_dim
+    #     result = None
+        
+    #     if not self.use_fused_kernel:
+    #         # COPY FROM ASSIGN2_4
+    #         # raise NotImplementedError
+    #         scores = q @ kT # (batch_size, num_heads, seq_len, seq_len)
+    #         scores = scores / (self.attn_hidden_dim ** 0.5)
+    #         if self.causal:
+    #             scores = scores + self.create_causal_mask(queries_len)
+            
+    #         attn = softmax(scores, dim=3)
+    #         attn = self.dropout(attn)
+    #         result = attn @ v # (batch_size, num_heads, seq_len, attn_hidden_dim)
+
+    #         result = result.contiguous()
+    #         result = result.permute(0, 2, 1, 3)
+    #         result = result.contiguous()
+    #         result = result.view(batch_size, queries_len, self.n_embd)
+    #         result = self.out_projection(result)
+    #     else:
+    #         # BEGIN ASSIGN3_3
+    #         # raise NotImplementedError
+    #         scores = q @ kT
+    #         scores = scores / (self.attn_hidden_dim ** 0.5)
+    #         mask = None
+    #         if self.causal:
+    #             mask = self.create_causal_mask(batch_size, num_head, queries_len)
+            
+    #         from .tensor_functions import Attn_Softmax
+    #         attn = Attn_Softmax.apply(scores, mask if mask is not None else scores.zeros((batch_size, 1, 1, queries_len)))
+    #         attn = self.dropout(attn)
+    #         result = attn @ v
+            
+    #         result = result.contiguous()
+    #         result = result.permute(0, 2, 1, 3)
+    #         result = result.contiguous()
+    #         result = result.view(batch_size, queries_len, self.n_embd)
+    #         result = self.out_projection(result)
+    #         # END ASSIGN3_3
+
+    #     return result
+
     def self_attention(self, q, kT, v):
         """Given q, kT, and v of sizes defined above, return the result of MultiHeadAttention as described in the writeup
         softmax((q @ kT) / sqrt(attn_hidden_dim)) @ V.
@@ -102,17 +164,29 @@ class MultiHeadAttention(Module):
         assert q_dim == k_dim == v_dim
         result = None
         
-        if not self.use_fused_kernel:
+        if self.use_flash_attention:
+            # Reshape kT back to (batch_size, num_heads, seq_len, head_dim)
+            k = kT.permute(0, 1, 3, 2)
+            # Use FlashAttention
+            result = FlashAttention.apply(q, k, v, self.causal, 1.0 / (self.attn_hidden_dim ** 0.5))
+            
+            # Reshape the output for the output projection
+            result = result.contiguous()
+            result = result.permute(0, 2, 1, 3)
+            result = result.contiguous()
+            result = result.view(batch_size, queries_len, self.n_embd)
+            result = self.out_projection(result)
+        elif not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
-            # raise NotImplementedError
-            scores = q @ kT # (batch_size, num_heads, seq_len, seq_len)
+            # Original implementation
+            scores = q @ kT 
             scores = scores / (self.attn_hidden_dim ** 0.5)
             if self.causal:
                 scores = scores + self.create_causal_mask(queries_len)
             
             attn = softmax(scores, dim=3)
             attn = self.dropout(attn)
-            result = attn @ v # (batch_size, num_heads, seq_len, attn_hidden_dim)
+            result = attn @ v
 
             result = result.contiguous()
             result = result.permute(0, 2, 1, 3)
@@ -120,8 +194,7 @@ class MultiHeadAttention(Module):
             result = result.view(batch_size, queries_len, self.n_embd)
             result = self.out_projection(result)
         else:
-            # BEGIN ASSIGN3_3
-            # raise NotImplementedError
+            # ASSIGN3_3 implementation
             scores = q @ kT
             scores = scores / (self.attn_hidden_dim ** 0.5)
             mask = None
@@ -138,7 +211,6 @@ class MultiHeadAttention(Module):
             result = result.contiguous()
             result = result.view(batch_size, queries_len, self.n_embd)
             result = self.out_projection(result)
-            # END ASSIGN3_3
 
         return result
 
