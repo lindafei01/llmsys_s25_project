@@ -766,3 +766,10 @@ class FlashAttention(Function):
         
         # Return gradients for q, k, v, and None for the other arguments (causal_mask and sm_scale)
         return dq, dk, dv, None, None
+
+def flash_attention_forward(q: Tensor, k: Tensor, v: Tensor, causal_mask: bool = False, sm_scale: float = None) -> Tensor:
+    pass
+
+def flash_attention_backward(grad_output: Tensor, q: Tensor, k: Tensor, v: Tensor, 
+                           causal_mask: bool = False, sm_scale: float = None) -> Tuple[Tensor, Tensor, Tensor]:
+    pass

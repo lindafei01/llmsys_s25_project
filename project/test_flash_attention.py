@@ -2,7 +2,6 @@ import torch
 from torch.nn import functional as F
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import minitorch
 import numpy as np
 from minitorch.tensor_functions import FlashAttention
