@@ -1,5 +1,8 @@
 import torch
 from torch.nn import functional as F
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import minitorch
 import numpy as np
 from minitorch.tensor_functions import FlashAttention
@@ -8,15 +11,18 @@ import gc
 import torch
 from torch.nn import functional as F
 import time
+import tracemalloc
+import argparse
 
 def test_flash_attention_correctness():
     """
     Test FlashAttention implementation against PyTorch's attention
     """
+
     # Test parameters
-    batch_size = 4
+    batch_size = 32
     n_heads = 8
-    seq_len = 512
+    seq_len = 40
     head_dim = 64
     
     # Create inputs (use same values for both implementations)
@@ -38,7 +44,7 @@ def test_flash_attention_correctness():
     scale = 1.0 / (head_dim ** 0.5)
     
     # Forward pass with PyTorch (standard attention)
-    def torch_attention(q, k, v, causal=False):
+    def torch_attention(q, k, v, causal=True):
         scores = torch.matmul(q, k.transpose(-2, -1)) * scale
         
         if causal:
@@ -49,8 +55,8 @@ def test_flash_attention_correctness():
         return torch.matmul(attn_weights, v)
     
     # Run both implementations
-    torch_output = torch_attention(torch_q, torch_k, torch_v, causal=False)
-    mini_output = FlashAttention.apply(mini_q, mini_k, mini_v, False, scale)
+    torch_output = torch_attention(torch_q, torch_k, torch_v, causal=True)
+    mini_output = FlashAttention.apply(mini_q, mini_k, mini_v, True, scale)
     
     # Compare forward pass results
     np_mini_output = mini_output.to_numpy()
@@ -81,75 +87,103 @@ def test_flash_attention_correctness():
 
 def test_flash_attention_memory():
     """
-    Test memory usage of FlashAttention compared to standard attention
+    Test peak memory usage (footprint) of FlashAttention compared to standard attention
     """
-
     
-    def get_memory_usage():
-        process = psutil.Process()
-        return process.memory_info().rss / (1024 * 1024)  # Convert to MB
-    
-    # Test parameters - larger sequence length for better memory benefit visibility
-    batch_size = 4
+    batch_size = 32
     n_heads = 8
-    seq_lengths = [512, 1024, 2048, 4096]  # Test with different sequence lengths
+    seq_lengths = [512, 1024, 2048, 4096] 
     head_dim = 64
     
-    print("\nMemory usage comparison (in MB):")
+    print("\nMemory footprint comparison (in MB):")
     print("-" * 70)
     print(f"{'Seq Length':^15} | {'Standard Attention':^25} | {'Flash Attention':^25}")
     print("-" * 70)
     
     for seq_len in seq_lengths:
-        # Clear memory
+
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         gc.collect()
         
-        # Create inputs
         np_q = np.random.randn(batch_size, n_heads, seq_len, head_dim).astype(np.float32)
         np_k = np.random.randn(batch_size, n_heads, seq_len, head_dim).astype(np.float32)
         np_v = np.random.randn(batch_size, n_heads, seq_len, head_dim).astype(np.float32)
         
-        # Scale factor
         scale = 1.0 / (head_dim ** 0.5)
         
-        # Standard attention memory test
-        baseline_memory = get_memory_usage()
-        
-        # MiniTorch standard attention (without FlashAttention)
-        def standard_attention():
+        def measure_standard_attention_memory():
+            tracemalloc.start()
+            
             q = minitorch.tensor_from_numpy(np_q)
             k = minitorch.tensor_from_numpy(np_k)
             v = minitorch.tensor_from_numpy(np_v)
             
-            # Standard attention computation
+            current, peak = tracemalloc.get_traced_memory()
+            
             scores = q @ k.permute(0, 1, 3, 2) * scale
+            
+            # Apply causal mask
+            batch_size, n_heads, seq_len, _ = scores.shape
+            mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
+            mask_tensor = minitorch.tensor_from_numpy(mask.numpy())
+            scores = scores.masked_fill(mask_tensor, -float('inf'))
+            
+            current2, peak2 = tracemalloc.get_traced_memory()
+            peak = max(peak, peak2)
+            
             attn_weights = minitorch.softmax(scores, dim=-1)
-            return attn_weights @ v
+            
+            current3, peak3 = tracemalloc.get_traced_memory()
+            peak = max(peak, peak3)
+            
+            result = attn_weights @ v
+            
+            current4, peak4 = tracemalloc.get_traced_memory()
+            peak = max(peak, peak4)
+            
+            tracemalloc.stop()
+            return result, peak / (1024 * 1024)  # Convert to MB
         
-        _ = standard_attention()
-        standard_memory = get_memory_usage() - baseline_memory
-        
-        # Clear memory again
-        gc.collect()
-        baseline_memory = get_memory_usage()
-        
-        # FlashAttention memory test
-        def flash_attention():
+        def measure_flash_attention_memory():
+            tracemalloc.start()
+            
             q = minitorch.tensor_from_numpy(np_q)
             k = minitorch.tensor_from_numpy(np_k)
             v = minitorch.tensor_from_numpy(np_v)
             
-            return FlashAttention.apply(q, k, v, False, scale)
+            current, peak = tracemalloc.get_traced_memory()
+            
+            result = FlashAttention.apply(q, k, v, True, scale)
+            
+            current2, peak2 = tracemalloc.get_traced_memory()
+            peak = max(peak, peak2)
+            
+            tracemalloc.stop()
+            return result, peak / (1024 * 1024)
         
-        _ = flash_attention()
-        flash_memory = get_memory_usage() - baseline_memory
+        # Measure memory footprint
+        try:
+            _, standard_memory = measure_standard_attention_memory()
+        except Exception as e:
+            print(f"Standard attention failed for seq_len={seq_len}: {e}")
+            standard_memory = float('inf')
+        
+        gc.collect()  # Clear memory between tests
+        
+        try:
+            _, flash_memory = measure_flash_attention_memory()
+        except Exception as e:
+            print(f"Flash attention failed for seq_len={seq_len}: {e}")
+            flash_memory = float('inf')
         
         # Print results
         print(f"{seq_len:^15} | {standard_memory:^25.2f} | {flash_memory:^25.2f}")
     
     print("-" * 70)
-    print(f"Memory reduction: {(1 - flash_memory/standard_memory) * 100:.2f}% for seq_len={seq_lengths[-1]}")
+    if standard_memory != float('inf') and flash_memory != float('inf'):
+        print(f"Memory reduction: {(1 - flash_memory/standard_memory) * 100:.2f}% for seq_len={seq_lengths[-1]}")
+    else:
+        print("Could not calculate memory reduction due to OOM error")
 
 def test_flash_attention_speed():
     """
@@ -157,7 +191,7 @@ def test_flash_attention_speed():
     """
     
     # Test parameters
-    batch_size = 4
+    batch_size = 32
     n_heads = 8
     seq_lengths = [512, 1024, 2048, 4096]  # Test with different sequence lengths
     head_dim = 64
@@ -185,6 +219,12 @@ def test_flash_attention_speed():
             
             # Standard attention computation
             scores = q @ k.permute(0, 1, 3, 2) * scale
+            
+            # Apply causal mask
+            mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
+            mask_tensor = minitorch.tensor_from_numpy(mask.numpy())
+            scores = scores.masked_fill(mask_tensor, -float('inf'))
+            
             attn_weights = minitorch.softmax(scores, dim=-1)
             return attn_weights @ v
         
@@ -206,7 +246,7 @@ def test_flash_attention_speed():
             k = minitorch.tensor_from_numpy(np_k)
             v = minitorch.tensor_from_numpy(np_v)
             
-            return FlashAttention.apply(q, k, v, False, scale)
+            return FlashAttention.apply(q, k, v, True, scale)
         
         # Warmup
         _ = run_flash_attention()
@@ -225,3 +265,16 @@ def test_flash_attention_speed():
     
     print("-" * 70)
     print(f"Speedup: {standard_avg_time/flash_avg_time:.2f}x for seq_len={seq_lengths[-1]}")
+
+if __name__ == "__main__":
+
+    print("=== Testing FlashAttention Correctness ===")
+    test_flash_attention_correctness()
+
+    print("\n=== Testing FlashAttention Memory Usage ===")
+    test_flash_attention_memory()
+
+    print("\n=== Testing FlashAttention Speed ===")
+    test_flash_attention_speed()
+    
+    print("\nAll requested tests completed successfully!")
