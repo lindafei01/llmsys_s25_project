@@ -105,7 +105,6 @@ def test_flash_attention_memory():
         np_k = np.random.randn(batch_size, n_heads, seq_len, head_dim).astype(np.float32)
         np_v = np.random.randn(batch_size, n_heads, seq_len, head_dim).astype(np.float32)
         
-
         mini_q = minitorch.tensor_from_numpy(np_q, backend=cuda_backend)
         mini_k = minitorch.tensor_from_numpy(np_k, backend=cuda_backend)
         mini_v = minitorch.tensor_from_numpy(np_v, backend=cuda_backend)
@@ -131,7 +130,8 @@ def test_flash_attention_memory():
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
             
             with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU],
+                activities=[torch.profiler.ProfilerActivity.CPU, 
+                           torch.profiler.ProfilerActivity.CUDA if torch.cuda.is_available() else torch.profiler.ProfilerActivity.CPU],
                 profile_memory=True,
                 record_shapes=True
             ) as prof_standard:
@@ -141,7 +141,10 @@ def test_flash_attention_memory():
             for event in prof_standard.key_averages():
                 if event.self_cpu_memory_usage > 0:
                     standard_memory += event.self_cpu_memory_usage
-            standard_memory = standard_memory / (1024 * 1024) 
+                if hasattr(event, 'self_cuda_memory_usage') and event.self_cuda_memory_usage > 0:
+                    standard_memory += event.self_cuda_memory_usage
+            
+            standard_memory = standard_memory / (1024 * 1024)
             
         except Exception as e:
             print(f"Standard attention failed for seq_len={seq_len}: {e}")
@@ -152,7 +155,8 @@ def test_flash_attention_memory():
         
         try:
             with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU],
+                activities=[torch.profiler.ProfilerActivity.CPU,
+                           torch.profiler.ProfilerActivity.CUDA if torch.cuda.is_available() else torch.profiler.ProfilerActivity.CPU],
                 profile_memory=True,
                 record_shapes=True
             ) as prof_flash:
@@ -162,6 +166,9 @@ def test_flash_attention_memory():
             for event in prof_flash.key_averages():
                 if event.self_cpu_memory_usage > 0:
                     flash_memory += event.self_cpu_memory_usage
+                if hasattr(event, 'self_cuda_memory_usage') and event.self_cuda_memory_usage > 0:
+                    flash_memory += event.self_cuda_memory_usage
+            
             flash_memory = flash_memory / (1024 * 1024)
             
         except Exception as e:
@@ -169,13 +176,6 @@ def test_flash_attention_memory():
             flash_memory = float('inf')
         
         print(f"{seq_len:^15} | {standard_memory:^25.2f} | {flash_memory:^25.2f}")
-    
-    print("-" * 70)
-    if standard_memory != float('inf') and flash_memory != float('inf'):
-        memory_reduction = (1 - flash_memory/standard_memory) * 100
-        print(f"Memory reduction: {memory_reduction:.2f}% for seq_len={seq_lengths[-1]}")
-    else:
-        print("Could not calculate memory reduction due to OOM error")
         
 def test_flash_attention_speed():
     """
@@ -207,9 +207,10 @@ def test_flash_attention_speed():
 
             scores = q @ k.permute(0, 1, 3, 2) * scale
             
-            mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
-            mask_tensor = minitorch.tensor_from_numpy(mask.numpy(), backend=cuda_backend)
-            scores = scores.masked_fill(mask_tensor, -float('inf'))
+            mask = -np.finfo(np.float32).max * np.triu(np.ones((batch_size, n_heads, seq_len, seq_len), dtype=np.float32), 1)
+            mask_tensor = minitorch.tensor_from_numpy(mask, backend=cuda_backend)
+            
+            scores = scores + mask_tensor
             
             attn_weights = minitorch.softmax(scores, dim=-1)
             return attn_weights @ v
@@ -250,11 +251,11 @@ def test_flash_attention_speed():
     
 if __name__ == "__main__":
 
-    # print("=== Testing FlashAttention Correctness ===")
-    # test_flash_attention_correctness()
+    print("=== Testing FlashAttention Correctness ===")
+    test_flash_attention_correctness()
 
-    # print("\n=== Testing FlashAttention Memory Usage ===")
-    # test_flash_attention_memory()
+    print("\n=== Testing FlashAttention Memory Usage ===")
+    test_flash_attention_memory()
 
     print("\n=== Testing FlashAttention Speed ===")
     test_flash_attention_speed()
