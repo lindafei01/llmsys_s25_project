@@ -1,3 +1,3 @@
-# llmsys_s24_hw3
+# llmsys_s24_project
 
-Public repository for Assignment 3 of 11-868 LLM Systems.
+Flash Attention Re-implementation
