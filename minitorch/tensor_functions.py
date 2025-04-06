@@ -48,9 +48,13 @@ class Function:
         raw_vals = []
         need_grad = False
         for v in vals:
-            if v.requires_grad():
+            if hasattr(v, 'requires_grad') and v.requires_grad():
                 need_grad = True
-            raw_vals.append(v.detach())
+                raw_vals.append(v.detach())
+            elif isinstance(v, minitorch.Tensor):
+                raw_vals.append(v.detach())
+            else:
+                raw_vals.append(v)
 
         # Create the context.
         ctx = Context(not need_grad)
