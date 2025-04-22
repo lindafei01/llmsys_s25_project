@@ -7,6 +7,8 @@ from __future__ import annotations
 import random
 from typing import TYPE_CHECKING
 
+from .flash_attn_fused import _attention
+import torch
 import numpy as np
 import copy
 
@@ -116,8 +118,12 @@ class Mul(Function):
     def backward(ctx: Context, grad_output: Tensor) -> Tuple[Tensor, Tensor]:
         # ASSIGN2.4
         a, b = ctx.saved_values
-        # import pdb
-        # pdb.set_trace()
+
+        def transpose(a: Tensor) -> Tensor:
+            order = list(range(a.dims))
+            order[-2], order[-1] = order[-1], order[-2]
+            return a._new(a._tensor.permute(*order))
+
         return (
             grad_output.f.mul_zip(b, grad_output),
             grad_output.f.mul_zip(a, grad_output),
@@ -742,12 +748,33 @@ class FlashAttention(Function):
             sm_scale = 1.0 / (head_dim ** 0.5)
         ctx.sm_scale = sm_scale
         
-        # Call the core FlashAttention implementation (to be implemented by your teammates)
-        # This is just a placeholder - your teammates will implement the actual function
-        output = flash_attention_forward(q, k, v, causal_mask, sm_scale)
+        # Simple PyTorch implementation
+        import torch
+        import torch.nn.functional as F
+        
+        # Convert to PyTorch tensors
+        q_torch = torch.tensor(q.to_numpy(), requires_grad=False)
+        k_torch = torch.tensor(k.to_numpy(), requires_grad=False)
+        v_torch = torch.tensor(v.to_numpy(), requires_grad=False)
+        
+        # Calculate attention scores
+        scores = torch.matmul(q_torch, k_torch.transpose(-2, -1)) * sm_scale
+        
+        # Apply causal mask if needed
+        if causal_mask:
+            seq_len = q.shape[-2]
+            mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
+            scores.masked_fill_(mask, float('-inf'))
+        
+        # Apply softmax and compute output
+        attn_weights = F.softmax(scores, dim=-1)
+        output_torch = torch.matmul(attn_weights, v_torch)
+        
+        # Convert back to MiniTorch tensor
+        output = tensor_from_numpy(output_torch.numpy(), backend=q.backend, requires_grad=q.requires_grad())
         
         return output
-
+    
     @staticmethod
     def backward(ctx: Context, grad_output: Tensor) -> Tuple[Tensor, Tensor, Tensor, None, None]:
         """
@@ -764,16 +791,33 @@ class FlashAttention(Function):
         causal_mask = ctx.causal_mask
         sm_scale = ctx.sm_scale
         
-        # Call the core FlashAttention backward implementation (to be implemented by your teammates)
-        # This is just a placeholder - your teammates will implement the actual function
-        dq, dk, dv = flash_attention_backward(grad_output, q, k, v, causal_mask, sm_scale)
+        # Use PyTorch's autograd for computing gradients
+        import torch
+        import torch.nn.functional as F
         
-        # Return gradients for q, k, v, and None for the other arguments (causal_mask and sm_scale)
+        # Convert to PyTorch tensors with gradient tracking
+        q_torch = torch.tensor(q.to_numpy(), requires_grad=True)
+        k_torch = torch.tensor(k.to_numpy(), requires_grad=True)
+        v_torch = torch.tensor(v.to_numpy(), requires_grad=True)
+        grad_output_torch = torch.tensor(grad_output.to_numpy())
+        
+        # Forward pass with gradient tracking
+        scores = torch.matmul(q_torch, k_torch.transpose(-2, -1)) * sm_scale
+        
+        if causal_mask:
+            seq_len = q.shape[-2]
+            mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
+            scores.masked_fill_(mask, float('-inf'))
+        
+        attn_weights = F.softmax(scores, dim=-1)
+        output_torch = torch.matmul(attn_weights, v_torch)
+        
+        # Backward pass using autograd
+        output_torch.backward(grad_output_torch)
+        
+        # Convert gradients back to MiniTorch tensors
+        dq = tensor_from_numpy(q_torch.grad.numpy(), backend=q.backend)
+        dk = tensor_from_numpy(k_torch.grad.numpy(), backend=k.backend)
+        dv = tensor_from_numpy(v_torch.grad.numpy(), backend=v.backend)
+        
         return dq, dk, dv, None, None
-
-def flash_attention_forward(q: Tensor, k: Tensor, v: Tensor, causal_mask: bool = False, sm_scale: float = None) -> Tensor:
-    pass
-
-def flash_attention_backward(grad_output: Tensor, q: Tensor, k: Tensor, v: Tensor, 
-                           causal_mask: bool = False, sm_scale: float = None) -> Tuple[Tensor, Tensor, Tensor]:
-    pass
