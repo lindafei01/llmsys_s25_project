@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
 #include <curand_kernel.h>
+#include <stdio.h>
 
 // 块大小常量定义
 #define BLOCK_M 64    // Query sequence block size
@@ -18,7 +19,7 @@ struct BlockConfig {
     size_t shared_mem_size;
 };
 
-__device__ BlockConfig calculate_block_config(int M, int d, int N) {
+__host__ __device__ BlockConfig calculate_block_config(int M, int d, int N) {
     BlockConfig config;
     config.Bc = M / (4 * d);
     config.Br = min(M / (4 * d), d);
