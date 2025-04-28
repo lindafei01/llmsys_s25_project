@@ -53,14 +53,17 @@ def test_flash_attention():
         
         # 2. 基础 Attention 实现
         start_time = time.time()
-        # 生成 causal mask
-        mask = np.triu(np.ones((seq_len, seq_len)), k=1) * -1e8
-        # 扩展 mask 维度以匹配 scores: (batch_size, num_heads, seq_len, seq_len)
-        mask = np.broadcast_to(mask.reshape(1, 1, seq_len, seq_len), (batch_size, num_heads, seq_len, seq_len))
-        mask_tensor = minitorch.tensor(mask, backend=backend)
-        
+        # 计算注意力分数
         scores = (q @ transpose(k)) * (1.0 / np.sqrt(head_dim))
-        scores = scores + mask_tensor
+        
+        if True:  # causal masking
+            mask = np.full((seq_len, seq_len), float('-inf'))
+            mask = np.triu(mask, k=1)  # 上三角设为 -inf
+            mask = np.broadcast_to(mask.reshape(1, 1, seq_len, seq_len), 
+                                 (batch_size, num_heads, seq_len, seq_len))
+            mask_tensor = minitorch.tensor(mask, backend=backend)
+            scores = scores + mask_tensor
+        
         attn = minitorch.nn.softmax(scores, dim=-1)
         out_base = attn @ v
         out_base.backward(grad)
