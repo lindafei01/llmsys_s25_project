@@ -57,11 +57,12 @@ def test_flash_attention():
         scores = (q @ transpose(k)) * (1.0 / np.sqrt(head_dim))
         
         if True:  # causal masking
-            mask = np.full((seq_len, seq_len), float('-inf'))
-            mask = np.triu(mask, k=1)  # 上三角设为 -inf
-            mask = np.broadcast_to(mask.reshape(1, 1, seq_len, seq_len), 
-                                 (batch_size, num_heads, seq_len, seq_len))
-            mask_tensor = minitorch.tensor(mask, backend=backend)
+            # 直接创建完整形状的 mask，使用与 transformer 模块相同的方式
+            mask = -np.finfo(np.float32).max * np.triu(
+                np.ones((batch_size, num_heads, seq_len, seq_len), dtype=np.float32), 
+                k=1
+            )
+            mask_tensor = minitorch.tensor_from_numpy(mask, backend=backend)
             scores = scores + mask_tensor
         
         attn = minitorch.nn.softmax(scores, dim=-1)
