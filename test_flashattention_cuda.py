@@ -55,18 +55,12 @@ def test_flash_attention():
         start_time = time.time()
         # 生成 causal mask
         mask = np.triu(np.ones((seq_len, seq_len)), k=1) * -1e8
-        # 扩展 mask 维度以匹配 scores: (1, 1, seq_len, seq_len)
-        mask = mask.reshape(1, 1, seq_len, seq_len)
+        # 扩展 mask 维度以匹配 scores: (batch_size, num_heads, seq_len, seq_len)
+        mask = np.broadcast_to(mask.reshape(1, 1, seq_len, seq_len), (batch_size, num_heads, seq_len, seq_len))
         mask_tensor = minitorch.tensor(mask, backend=backend)
         
         scores = (q @ transpose(k)) * (1.0 / np.sqrt(head_dim))
-        # 将 scores 和 mask_tensor 展平为一维
-        scores_flat = scores.view(-1)
-        mask_tensor_flat = mask_tensor.expand_as(scores).view(-1)
-        # 执行加法操作
-        scores_flat = scores_flat + mask_tensor_flat
-        # 恢复原始形状
-        scores = scores_flat.view(batch_size, num_heads, seq_len, seq_len)
+        scores = scores + mask_tensor
         attn = minitorch.nn.softmax(scores, dim=-1)
         out_base = attn @ v
         out_base.backward(grad)
