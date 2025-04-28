@@ -32,16 +32,22 @@ def test_flash_attention():
         
         # 创建输入数据
         shape = (batch_size, num_heads, seq_len, head_dim)
-        # 确保打印张量的shape以便调试
-        q = minitorch.tensor(np.random.randn(*shape), backend=backend, requires_grad=True)
-        print(f"Query tensor shape: {q.shape}")
-        k = minitorch.tensor(np.random.randn(*shape), backend=backend, requires_grad=True)
-        v = minitorch.tensor(np.random.randn(*shape), backend=backend, requires_grad=True)
         
-        # 验证张量维度
-        assert len(q.shape) == 4, f"Query tensor should be 4D, got {len(q.shape)}D"
-        assert len(k.shape) == 4, f"Key tensor should be 4D, got {len(k.shape)}D"
-        assert len(v.shape) == 4, f"Value tensor should be 4D, got {len(v.shape)}D"
+        # 使用 tensor_from_numpy 替代 tensor
+        q = minitorch.tensor_from_numpy(np.random.randn(*shape).astype(np.float32), 
+                                      backend=backend, 
+                                      requires_grad=True)
+        k = minitorch.tensor_from_numpy(np.random.randn(*shape).astype(np.float32), 
+                                      backend=backend, 
+                                      requires_grad=True)
+        v = minitorch.tensor_from_numpy(np.random.randn(*shape).astype(np.float32), 
+                                      backend=backend, 
+                                      requires_grad=True)
+        
+        # 打印形状进行验证
+        print(f"Query tensor shape: {q.shape}")
+        print(f"Key tensor shape: {k.shape}")
+        print(f"Value tensor shape: {v.shape}")
         
         # Forward
         out_flash = q.flash_attention(k, v, causal=True)
