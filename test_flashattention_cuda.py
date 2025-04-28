@@ -1,6 +1,6 @@
 import numpy as np
 import time
-import torch  # 仅用于结果比较
+import torch  
 import minitorch
 from minitorch.cuda_kernel_ops import CudaKernelOps
 
@@ -10,7 +10,6 @@ def transpose(a: minitorch.Tensor) -> minitorch.Tensor:
 
 def test_flash_attention():
     """测试不同序列长度下 Flash Attention 的正确性和性能"""
-
     backend = minitorch.TensorBackend(CudaKernelOps)
     
     # 固定参数
@@ -31,19 +30,22 @@ def test_flash_attention():
     for seq_len in seq_lengths:
         print(f"\nTesting sequence length: {seq_len}")
         
-        # 使用 numpy 生成随机数据
-        np.random.seed(42)  # 设置随机种子以保证结果可复现
-        shape = (batch_size, num_heads, seq_len, head_dim)
-        
         # 创建输入数据
+        shape = (batch_size, num_heads, seq_len, head_dim)
+        # 确保打印张量的shape以便调试
         q = minitorch.tensor(np.random.randn(*shape), backend=backend, requires_grad=True)
+        print(f"Query tensor shape: {q.shape}")
         k = minitorch.tensor(np.random.randn(*shape), backend=backend, requires_grad=True)
         v = minitorch.tensor(np.random.randn(*shape), backend=backend, requires_grad=True)
-        grad = minitorch.tensor(np.random.randn(*shape), backend=backend)
         
-        # 1. Flash Attention 实现
-        start_time = time.time()
+        # 验证张量维度
+        assert len(q.shape) == 4, f"Query tensor should be 4D, got {len(q.shape)}D"
+        assert len(k.shape) == 4, f"Key tensor should be 4D, got {len(k.shape)}D"
+        assert len(v.shape) == 4, f"Value tensor should be 4D, got {len(v.shape)}D"
+        
+        # Forward
         out_flash = q.flash_attention(k, v, causal=True)
+        grad = minitorch.tensor(np.random.randn(*shape), backend=backend)
         out_flash.backward(grad)
         flash_time = time.time() - start_time
         
