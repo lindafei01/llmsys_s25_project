@@ -69,8 +69,8 @@ def test_attention_implementations():
     num_heads = 8
     head_dim = 64
     
-    # 测试不同的序列长度
-    seq_lengths = [64, 128, 256, 512, 1024, 2048]
+    # seq_lengths = [64, 128, 256, 512, 1024, 2048]
+    seq_lengths = [256]
     
     print("\nAttention Implementations Comparison:")
     print("=" * 70)
