@@ -60,10 +60,13 @@ def test_flash_attention():
         mask_tensor = minitorch.tensor(mask, backend=backend)
         
         scores = (q @ transpose(k)) * (1.0 / np.sqrt(head_dim))
-        # 确保张量是连续的
-        scores = scores.contiguous()
-        mask_tensor = mask_tensor.contiguous()
-        scores = scores + mask_tensor
+        # 将 scores 和 mask_tensor 展平为一维
+        scores_flat = scores.view(-1)
+        mask_tensor_flat = mask_tensor.expand_as(scores).view(-1)
+        # 执行加法操作
+        scores_flat = scores_flat + mask_tensor_flat
+        # 恢复原始形状
+        scores = scores_flat.view(batch_size, num_heads, seq_len, seq_len)
         attn = minitorch.nn.softmax(scores, dim=-1)
         out_base = attn @ v
         out_base.backward(grad)
