@@ -250,6 +250,15 @@ class SimpleOps(TensorOps):
     @staticmethod
     def layernorm_bw():
       raise NotImplementedError("Not implemented in this assignment")
+    
+    @staticmethod
+    def flash_attention_fw():
+      raise NotImplementedError("Not implemented in this assignment")
+
+    @staticmethod
+    def flash_attention_bw():
+      raise NotImplementedError("Not implemented in this assignment")
+
 
     is_cuda = False
 
