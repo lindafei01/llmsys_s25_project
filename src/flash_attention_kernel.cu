@@ -492,7 +492,9 @@ void flashAttentionForward(
     int seq_len,
     int head_dim,
     float sm_scale,
-    bool causal
+    float dropout_prob,
+    bool causal,
+    unsigned long long seed
 ) {
     // 设置grid和block维度
     dim3 grid(batch_size * num_heads, (seq_len + BLOCK_M - 1) / BLOCK_M);
@@ -512,7 +514,7 @@ void flashAttentionForward(
     flash_attention_forward_kernel<<<grid, block, shared_mem_size>>>(
         q, k, v, out, l, m,
         batch_size, num_heads, seq_len, head_dim,
-        sm_scale, causal
+        sm_scale, dropout_prob, causal, seed
     );
 }
 
@@ -532,7 +534,9 @@ void flashAttentionBackward(
     int seq_len,
     int head_dim,
     float sm_scale,
-    bool causal
+    float dropout_prob,
+    bool causal,
+    unsigned long long seed
 ) {
     // 设置grid和block维度
     dim3 grid(batch_size * num_heads, (seq_len + BLOCK_M - 1) / BLOCK_M);
@@ -554,7 +558,7 @@ void flashAttentionBackward(
         q, k, v, out, dout,
         dq, dk, dv, l, m,
         batch_size, num_heads, seq_len, head_dim,
-        sm_scale, causal
+        sm_scale, dropout_prob, causal, seed
     );
 }
 
