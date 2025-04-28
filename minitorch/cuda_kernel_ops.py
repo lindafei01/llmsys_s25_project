@@ -565,7 +565,7 @@ class CudaKernelOps(TensorOps):
         lib_flash.flashAttentionForward.restype = None
         
         # 3. 创建输出和中间结果tensor
-        out = q.zeros_like()
+        out = q.zeros(q.shape)
         l = q.zeros((batch_size, num_heads, seq_len))
         m = q.zeros((batch_size, num_heads, seq_len))
         
