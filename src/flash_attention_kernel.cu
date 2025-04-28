@@ -50,10 +50,13 @@ __global__ void flash_attention_forward_kernel(
     BlockConfig config = calculate_block_config(48 * 1024, head_dim, seq_len); // 假设48KB SRAM
     
     // 声明共享内存
-    extern __shared__ float shared_mem[]; // extern表示大小在运行时动态确定，而不是在编译时确定；__shared__表示同一个block内的所有线程都可以访问
+    extern __shared__ float shared_mem[];
     float* q_shared = shared_mem;
     float* k_shared = q_shared + config.Br * head_dim;
     float* v_shared = k_shared + config.Bc * head_dim;
+    float* mi = v_shared + config.Bc * head_dim;
+    float* li = mi + config.Br;
+    float* oi = li + config.Br;  // oi 长度为 config.Br * head_dim
     
     // 初始化随机数生成器（用于dropout）
     curandState rng_state;
@@ -73,16 +76,12 @@ __global__ void flash_attention_forward_kernel(
     const int base_idx = batch_idx * batch_stride + head_idx * head_stride;
     
     // 初始化局部累加器
-    float mi[config.Br];
-    float li[config.Br];
-    float oi[config.Br][head_dim];
-    
     #pragma unroll
     for (int i = 0; i < config.Br; i++) {
         mi[i] = -INFINITY;
         li[i] = 0.0f;
         for (int d = 0; d < head_dim; d++) {
-            oi[i][d] = 0.0f;
+            oi[i * head_dim + d] = 0.0f;
         }
     }
     
@@ -148,7 +147,7 @@ __global__ void flash_attention_forward_kernel(
                 // 更新累加器
                 li[i] = li[i] * scale + pij;
                 for (int d = 0; d < head_dim; d++) {
-                    oi[i][d] = oi[i][d] * scale + pij * v_shared[j * head_dim + d];
+                    oi[i * head_dim + d] = oi[i * head_dim + d] * scale + pij * v_shared[j * head_dim + d];
                 }
             }
         }
@@ -166,7 +165,7 @@ __global__ void flash_attention_forward_kernel(
         
         // 写出最终结果
         for (int d = 0; d < head_dim; d++) {
-            out[out_idx + d] = oi[i][d] / li[i];
+            out[out_idx + d] = oi[i * head_dim + d] / li[i];
         }
     }
 }
@@ -364,8 +363,18 @@ void flash_attention_forward_cuda(
     // 生成随机种子
     unsigned long long seed = rand();
     
+    // 计算shared memory大小
+    size_t shared_mem_size = (
+        config.Br * head_dim +     // Q块
+        config.Bc * head_dim +     // K块
+        config.Bc * head_dim +     // V块
+        config.Br +                // mi
+        config.Br +                // li
+        config.Br * head_dim       // oi
+    ) * sizeof(float);
+    
     // 启动kernel
-    flash_attention_forward_kernel<<<grid, block, config.shared_mem_size, stream>>>(
+    flash_attention_forward_kernel<<<grid, block, shared_mem_size, stream>>>(
         q, k, v, out, l, m,
         batch_size, num_heads, seq_len, head_dim,
         sm_scale, dropout_prob, causal, seed
