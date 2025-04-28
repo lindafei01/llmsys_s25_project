@@ -425,3 +425,22 @@ class Tensor:
 
     def layernorm(self, gamma: Tensor, beta: Tensor) -> Tensor:
       return LayerNorm.apply(self, gamma, beta)
+
+    def flash_attention(self, key, value, causal=False):
+        """Flash Attention implementation.
+        
+        Args:
+            key: Key tensor of shape [batch_size, num_heads, seq_len, head_dim]
+            value: Value tensor of shape [batch_size, num_heads, seq_len, head_dim]
+            causal: Whether to apply causal mask
+        
+        Returns:
+            Output tensor of shape [batch_size, num_heads, seq_len, head_dim]
+        """
+        # 确保输入形状正确
+        assert len(self.shape) == 4, f"Query tensor should be 4D, got {len(self.shape)}D"
+        assert self.shape == key.shape == value.shape, \
+            f"Shape mismatch: {self.shape} vs {key.shape} vs {value.shape}"
+        
+        # 调用 cuda_kernel_ops 中的实现
+        return self.backend.flash_attention_fw(self, key, value, causal)
