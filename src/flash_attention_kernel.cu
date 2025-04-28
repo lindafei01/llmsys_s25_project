@@ -477,3 +477,85 @@ void flash_attention_backward_cuda(
         return;
     }
 }
+
+extern "C" {
+
+void flashAttentionForward(
+    float* q,
+    float* k,
+    float* v,
+    float* out,
+    float* l,
+    float* m,
+    int batch_size,
+    int num_heads,
+    int seq_len,
+    int head_dim,
+    float sm_scale,
+    bool causal
+) {
+    // 设置grid和block维度
+    dim3 grid(batch_size * num_heads, (seq_len + BLOCK_M - 1) / BLOCK_M);
+    dim3 block(32, 32);
+    
+    // 计算shared memory大小
+    size_t shared_mem_size = (
+        BLOCK_M * head_dim +     // Q块
+        BLOCK_N * head_dim +     // K块
+        BLOCK_N * head_dim +     // V块
+        BLOCK_M +                // mi
+        BLOCK_M +                // li
+        BLOCK_M * head_dim       // oi
+    ) * sizeof(float);
+    
+    // 启动kernel
+    flash_attention_forward_kernel<<<grid, block, shared_mem_size>>>(
+        q, k, v, out, l, m,
+        batch_size, num_heads, seq_len, head_dim,
+        sm_scale, causal
+    );
+}
+
+void flashAttentionBackward(
+    float* q,
+    float* k,
+    float* v,
+    float* out,
+    float* dout,
+    float* dq,
+    float* dk,
+    float* dv,
+    float* l,
+    float* m,
+    int batch_size,
+    int num_heads,
+    int seq_len,
+    int head_dim,
+    float sm_scale,
+    bool causal
+) {
+    // 设置grid和block维度
+    dim3 grid(batch_size * num_heads, (seq_len + BLOCK_M - 1) / BLOCK_M);
+    dim3 block(32, 32);
+    
+    // 计算shared memory大小
+    size_t shared_mem_size = (
+        BLOCK_M * head_dim +     // Q块
+        BLOCK_N * head_dim +     // K块
+        BLOCK_N * head_dim +     // V块
+        BLOCK_M * head_dim +     // dO块
+        BLOCK_M * head_dim +     // dQ块
+        BLOCK_N * head_dim +     // dK块
+        BLOCK_N * head_dim       // dV块
+    ) * sizeof(float);
+    
+    // 启动kernel
+    flash_attention_backward_kernel<<<grid, block, shared_mem_size>>>(
+        q, k, v, out, dout,
+        dq, dk, dv, l, m,
+        batch_size, num_heads, seq_len, head_dim,
+        sm_scale, causal
+    );
+}
+
+} // extern "C"

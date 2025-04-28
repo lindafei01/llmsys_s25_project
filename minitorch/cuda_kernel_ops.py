@@ -540,3 +540,125 @@ class CudaKernelOps(TensorOps):
         return inp_grad, gamma_grad, beta_grad   
       #   END ASSIGN3_2
       
+    @staticmethod
+    def flash_attention_fw(q: Tensor, k: Tensor, v: Tensor, causal: bool = False) -> Tensor:
+        """Flash Attention forward implementation"""
+        # 1. 获取输入维度
+        batch_size, num_heads, seq_len, head_dim = q.shape
+        
+        # 2. 加载库并定义C函数的参数类型
+        lib_flash = ctypes.CDLL("minitorch/cuda_kernels/flash_attention.so")
+        lib_flash.flashAttentionForward.argtypes = [
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # q
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # k
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # v
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # out
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # l
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # m
+            ctypes.c_int,    # batch_size
+            ctypes.c_int,    # num_heads
+            ctypes.c_int,    # seq_len
+            ctypes.c_int,    # head_dim
+            ctypes.c_float,  # sm_scale
+            ctypes.c_bool    # causal
+        ]
+        lib_flash.flashAttentionForward.restype = None
+        
+        # 3. 创建输出和中间结果tensor
+        out = q.zeros_like()
+        l = q.zeros((batch_size, num_heads, seq_len))
+        m = q.zeros((batch_size, num_heads, seq_len))
+        
+        # 4. 调用CUDA kernel
+        lib_flash.flashAttentionForward(
+            q._tensor._storage,
+            k._tensor._storage,
+            v._tensor._storage,
+            out._tensor._storage,
+            l._tensor._storage,
+            m._tensor._storage,
+            batch_size,
+            num_heads,
+            seq_len,
+            head_dim,
+            1.0 / np.sqrt(head_dim),
+            causal
+        )
+        
+        # 5. 保存反向传播需要的context
+        out.ctx = {
+            'q': q,
+            'k': k,
+            'v': v,
+            'l': l,
+            'm': m,
+            'causal': causal,
+            'head_dim': head_dim,
+            'out': out  # 保存输出用于反向传播
+        }
+        
+        return out
+
+    @staticmethod
+    def flash_attention_bw(ctx, grad_output):
+        """Flash Attention backward implementation"""
+        # 1. 获取保存的context
+        q = ctx['q']
+        k = ctx['k']
+        v = ctx['v']
+        l = ctx['l']
+        m = ctx['m']
+        causal = ctx['causal']
+        head_dim = ctx['head_dim']
+        out = ctx['out']
+        batch_size, num_heads, seq_len, _ = q.shape
+        
+        # 2. 加载库并定义C函数的参数类型
+        lib_flash = ctypes.CDLL("minitorch/cuda_kernels/flash_attention.so")
+        lib_flash.flashAttentionBackward.argtypes = [
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # q
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # k
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # v
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # out
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # dout
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # dq
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # dk
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # dv
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # l
+            np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),  # m
+            ctypes.c_int,    # batch_size
+            ctypes.c_int,    # num_heads
+            ctypes.c_int,    # seq_len
+            ctypes.c_int,    # head_dim
+            ctypes.c_float,  # sm_scale
+            ctypes.c_bool    # causal
+        ]
+        lib_flash.flashAttentionBackward.restype = None
+        
+        # 3. 创建梯度tensor
+        dq = q.zeros_like()
+        dk = k.zeros_like()
+        dv = v.zeros_like()
+        
+        # 4. 调用CUDA kernel
+        lib_flash.flashAttentionBackward(
+            q._tensor._storage,
+            k._tensor._storage,
+            v._tensor._storage,
+            out._tensor._storage,     # 前向传播的输出
+            grad_output._tensor._storage,  # 反向传播的梯度
+            dq._tensor._storage,
+            dk._tensor._storage,
+            dv._tensor._storage,
+            l._tensor._storage,
+            m._tensor._storage,
+            batch_size,
+            num_heads,
+            seq_len,
+            head_dim,
+            1.0 / np.sqrt(head_dim),
+            causal
+        )
+        
+        return dq, dk, dv
+      
