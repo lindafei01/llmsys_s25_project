@@ -50,6 +50,7 @@ def test_flash_attention():
         print(f"Value tensor shape: {v.shape}")
         
         # Forward
+        start_time = time.time()
         out_flash = q.flash_attention(k, v, causal=True)
         grad = minitorch.tensor(np.random.randn(*shape), backend=backend)
         out_flash.backward(grad)
