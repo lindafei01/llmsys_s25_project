@@ -8,6 +8,12 @@ import minitorch
 from minitorch.cuda_kernel_ops import CudaKernelOps
 backend = minitorch.TensorBackend(CudaKernelOps)
 
+# 添加 transpose 函数定义
+def transpose(a: minitorch.Tensor) -> minitorch.Tensor:
+    order = list(range(a.dims))
+    order[-2], order[-1] = order[-1], order[-2]
+    return a._new(a._tensor.permute(*order))
+
 def test_flash_attention():
     """测试不同序列长度下 Flash Attention 的正确性和性能"""
     # 固定参数
@@ -56,8 +62,8 @@ def test_flash_attention():
         
         # 计时 - 基础 Attention
         start_time = time.time()
-        # Forward
-        scores = (q_base @ k_base.transpose(-2, -1)) * (1.0 / np.sqrt(head_dim))
+        # Forward - 使用新定义的 transpose 函数
+        scores = (q_base @ transpose(k_base)) * (1.0 / np.sqrt(head_dim))
         if True:  # causal
             mask = kt.dec_self_attn_mask(seq_len) * -1e8
             scores = scores + mask
