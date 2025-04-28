@@ -51,19 +51,8 @@ def test_flash_attention():
         # Forward
         start_time = time.time()
         out_flash = q.flash_attention(k, v, causal=True)
-        # 确保梯度的形状与输出相同
         out_flash.backward(grad)
         flash_time = time.time() - start_time
-        
-        # 保存 flash attention 的梯度
-        dq_flash = q.grad
-        dk_flash = k.grad
-        dv_flash = v.grad
-        
-        # 清除梯度以进行基础实现的计算
-        q.grad = None
-        k.grad = None
-        v.grad = None
         
         # 2. 基础 Attention 实现
         start_time = time.time()
@@ -87,11 +76,22 @@ def test_flash_attention():
         # 3. 结果比较
         # 转换为 torch tensor 便于比较
         out_flash = torch.tensor(out_flash._tensor._storage).float().cuda()
-        dq_flash = torch.tensor(dq_flash._tensor._storage).float().cuda()
-        dk_flash = torch.tensor(dk_flash._tensor._storage).float().cuda()
-        dv_flash = torch.tensor(dv_flash._tensor._storage).float().cuda()
-        
         out_base = torch.tensor(out_base._tensor._storage).float().cuda()
+        
+        # 保存 Flash Attention 的梯度
+        dq_flash = torch.tensor(q.grad._tensor._storage).float().cuda()
+        dk_flash = torch.tensor(k.grad._tensor._storage).float().cuda()
+        dv_flash = torch.tensor(v.grad._tensor._storage).float().cuda()
+        
+        # 清除梯度以进行基础实现的计算
+        q.grad = None
+        k.grad = None
+        v.grad = None
+        
+        # 执行基础实现的反向传播
+        out_base.backward(grad)
+        
+        # 获取基础实现的梯度
         dq_base = torch.tensor(q.grad._tensor._storage).float().cuda()
         dk_base = torch.tensor(k.grad._tensor._storage).float().cuda()
         dv_base = torch.tensor(v.grad._tensor._storage).float().cuda()
