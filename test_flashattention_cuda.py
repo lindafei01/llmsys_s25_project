@@ -80,8 +80,11 @@ def test_flash_attention():
         
         # 保存 Flash Attention 的梯度
         dq_flash = torch.tensor(q.grad._tensor._storage).float().cuda()
+        print("dq_flash", dq_flash)
         dk_flash = torch.tensor(k.grad._tensor._storage).float().cuda()
+        print("dk_flash", dq_flash)
         dv_flash = torch.tensor(v.grad._tensor._storage).float().cuda()
+        print("dv_flash", dq_flash)
         
         # 清除梯度以进行基础实现的计算
         q.grad = None
