@@ -33,28 +33,32 @@ def run_minitorch_attention(q, k, v, grad, head_dim, seq_len, batch_size, num_he
     return out
 
 def run_pytorch_attention(q, k, v, grad, head_dim, seq_len):
-    """运行 PyTorch 原生实现"""
-    causal_mask = torch.triu(torch.ones(seq_len, seq_len, device='cuda'), diagonal=1).bool()
-    out = F.scaled_dot_product_attention(
-        q, k, v,
-        attn_mask=causal_mask,
-        is_causal=True,
-        scale=1.0 / np.sqrt(head_dim)
-    )
+    """运行 PyTorch 基础实现"""
+    # 计算注意力分数
+    scores = torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(head_dim)
+    
+    # 创建因果注意力掩码
+    mask = torch.triu(torch.ones(seq_len, seq_len, device='cuda'), diagonal=1)
+    mask = mask.expand(q.size(0), q.size(1), seq_len, seq_len)
+    scores = scores.masked_fill(mask.bool(), float('-inf'))
+    
+    # 应用 softmax
+    attn = F.softmax(scores, dim=-1)
+    
+    # 计算输出
+    out = torch.matmul(attn, v)
     out.backward(grad)
     return out
 
 def test_attention_implementations():
-    """对比测试不同的 Attention 实现"""
     backend = minitorch.TensorBackend(CudaKernelOps)
     
-    # 固定参数
     batch_size = 32
     num_heads = 8
     head_dim = 64
     
     # 测试不同的序列长度
-    seq_lengths = [128, 256, 512, 1024, 2048]
+    seq_lengths = [64,128, 256, 512, 1024, 2048]
     
     print("\nAttention Implementations Comparison:")
     print("=" * 70)
@@ -85,7 +89,7 @@ def test_attention_implementations():
         implementations = {
             'Flash Attention': lambda: run_flash_attention(q, k, v, grad, head_dim),
             'Minitorch Base': lambda: run_minitorch_attention(q, k, v, grad, head_dim, seq_len, batch_size, num_heads),
-            'PyTorch Native': lambda: run_pytorch_attention(q_torch, k_torch, v_torch, grad_torch, head_dim, seq_len)
+            'PyTorch Base': lambda: run_pytorch_attention(q_torch, k_torch, v_torch, grad_torch, head_dim, seq_len)
         }
         
         # 存储每个实现的结果
@@ -97,7 +101,7 @@ def test_attention_implementations():
             initial_memory = torch.cuda.memory_allocated()
             
             # 清除梯度
-            if name == 'PyTorch Native':
+            if name == 'PyTorch Base':
                 q_torch.grad = k_torch.grad = v_torch.grad = None
             else:
                 q.grad = k.grad = v.grad = None
@@ -124,9 +128,9 @@ def test_attention_implementations():
             **{f"{k}_time": v['time'] for k, v in perf_results.items()},
             **{f"{k}_memory": v['memory'] for k, v in perf_results.items()},
             'speedup_vs_minitorch': perf_results['Minitorch Base']['time'] / flash_time,
-            'speedup_vs_pytorch': perf_results['PyTorch Native']['time'] / flash_time,
+            'speedup_vs_pytorch': perf_results['PyTorch Base']['time'] / flash_time,
             'memory_saved_vs_minitorch': perf_results['Minitorch Base']['memory'] - flash_memory,
-            'memory_saved_vs_pytorch': perf_results['PyTorch Native']['memory'] - flash_memory
+            'memory_saved_vs_pytorch': perf_results['PyTorch Base']['memory'] - flash_memory
         })
         
         # 打印当前结果
@@ -140,17 +144,17 @@ def test_attention_implementations():
         
         print("\nSpeedup Ratios:")
         print(f"vs Minitorch Base: {perf_results['Minitorch Base']['time'] / flash_time:.2f}x")
-        print(f"vs PyTorch Native: {perf_results['PyTorch Native']['time'] / flash_time:.2f}x")
+        print(f"vs PyTorch Base: {perf_results['PyTorch Base']['time'] / flash_time:.2f}x")
         
         print("\nMemory Savings:")
         print(f"vs Minitorch Base: {(perf_results['Minitorch Base']['memory'] - flash_memory):.2f} MB")
-        print(f"vs PyTorch Native: {(perf_results['PyTorch Native']['memory'] - flash_memory):.2f} MB")
+        print(f"vs PyTorch Base: {(perf_results['PyTorch Base']['memory'] - flash_memory):.2f} MB")
     
     # 打印汇总结果
     print("\n" + "=" * 120)
     print("Summary of Results:")
     print("=" * 120)
-    headers = ["Seq Len", "Flash (ms)", "MT Base (ms)", "PT Native (ms)", 
+    headers = ["Seq Len", "Flash (ms)", "MT Base (ms)", "PT Base (ms)", 
               "vs MT", "vs PT", "Flash Mem", "MT Mem", "PT Mem"]
     print(" | ".join(f"{h:>12}" for h in headers))
     print("-" * 120)
@@ -159,12 +163,12 @@ def test_attention_implementations():
         print(f"{r['seq_len']:>12} | "
               f"{r['Flash Attention_time']:>12.2f} | "
               f"{r['Minitorch Base_time']:>12.2f} | "
-              f"{r['PyTorch Native_time']:>12.2f} | "
+              f"{r['PyTorch Base_time']:>12.2f} | "
               f"{r['speedup_vs_minitorch']:>12.2f}x | "
               f"{r['speedup_vs_pytorch']:>12.2f}x | "
               f"{r['Flash Attention_memory']:>12.2f} | "
               f"{r['Minitorch Base_memory']:>12.2f} | "
-              f"{r['PyTorch Native_memory']:>12.2f}")
+              f"{r['PyTorch Base_memory']:>12.2f}")
 
 if __name__ == "__main__":
     test_attention_implementations()
