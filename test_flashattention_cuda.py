@@ -44,11 +44,6 @@ def test_flash_attention():
                                       backend=backend, 
                                       requires_grad=True)
         
-        # 打印形状进行验证
-        print(f"Query tensor shape: {q.shape}")
-        print(f"Key tensor shape: {k.shape}")
-        print(f"Value tensor shape: {v.shape}")
-        
         # Forward
         start_time = time.time()
         out_flash = q.flash_attention(k, v, causal=True)
@@ -60,6 +55,8 @@ def test_flash_attention():
         start_time = time.time()
         # 生成 causal mask
         mask = np.triu(np.ones((seq_len, seq_len)), k=1) * -1e8
+        # 扩展 mask 维度以匹配 scores: (1, 1, seq_len, seq_len)
+        mask = mask.reshape(1, 1, seq_len, seq_len)
         mask_tensor = minitorch.tensor(mask, backend=backend)
         
         scores = (q @ transpose(k)) * (1.0 / np.sqrt(head_dim))
