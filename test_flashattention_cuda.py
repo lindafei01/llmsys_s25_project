@@ -6,6 +6,9 @@ import minitorch
 from minitorch.cuda_kernel_ops import CudaKernelOps
 import pycuda.driver as cuda
 
+# 初始化 CUDA
+cuda.init()
+
 def transpose(a: minitorch.Tensor) -> minitorch.Tensor:
     return a._new(a._tensor.permute(0, 1, 3, 2))
 
@@ -72,24 +75,28 @@ def run_pytorch_attention(q, k, v, grad, head_dim, seq_len):
         return False
 
 def test_attention_implementations():
-    backend = minitorch.TensorBackend(CudaKernelOps)
-    
-    batch_size = 32
-    num_heads = 8
-    head_dim = 64
-    num_trials = 10  # 每个序列长度测试10次
-    
-    # 测试不同的序列长度
-    seq_lengths = [256]
-    
-    print("\nAttention Implementations Comparison:")
-    print("=" * 70)
-    print(f"Parameters: batch_size={batch_size}, num_heads={num_heads}, head_dim={head_dim}")
-    print(f"Number of trials per sequence length: {num_trials}")
-    
-    results = []
+    # 获取 CUDA 设备
+    cuda_device = cuda.Device(0)
+    cuda_context = cuda_device.make_context()
     
     try:
+        backend = minitorch.TensorBackend(CudaKernelOps)
+        
+        batch_size = 32
+        num_heads = 8
+        head_dim = 64
+        num_trials = 10  # 每个序列长度测试10次
+        
+        # 测试不同的序列长度
+        seq_lengths = [256]
+        
+        print("\nAttention Implementations Comparison:")
+        print("=" * 70)
+        print(f"Parameters: batch_size={batch_size}, num_heads={num_heads}, head_dim={head_dim}")
+        print(f"Number of trials per sequence length: {num_trials}")
+        
+        results = []
+        
         for seq_len in seq_lengths:
             print(f"\nTesting sequence length: {seq_len}")
             shape = (batch_size, num_heads, seq_len, head_dim)
@@ -220,8 +227,9 @@ def test_attention_implementations():
         print(f"Error during testing: {str(e)}")
     
     finally:
-        # 清理 GPU 内存
+        # 清理 GPU 内存和 CUDA 上下文
         torch.cuda.empty_cache()
+        cuda_context.pop()
         
         if results:
             # 打印汇总结果
