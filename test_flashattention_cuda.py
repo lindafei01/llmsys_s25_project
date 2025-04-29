@@ -160,6 +160,10 @@ def check_attention_correctness(seq_len=128):
         def relative_error(a, b):
             return np.max(np.abs(a - b) / (np.maximum(1e-8, np.abs(a) + np.abs(b)) / 2))
         
+        print("pytorch result:", pt_result)
+        print("minitorch result:", mt_result)
+        print("flash result:", flash_result)
+        
         flash_vs_pt = relative_error(flash_result, pt_result)
         flash_vs_mt = relative_error(flash_result, mt_result)
         mt_vs_pt = relative_error(mt_result, pt_result)
