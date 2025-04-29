@@ -151,8 +151,10 @@ def check_attention_correctness(seq_len=128):
         # 将结果转换为NumPy进行比较
         print("比较输出结果...")
         pt_result = pt_out.detach().cpu().numpy()
-        mt_result = mt_out._tensor.cpu().numpy()
-        flash_result = flash_out._tensor.cpu().numpy()
+        
+        # 正确处理 minitorch tensor 转 numpy
+        mt_result = mt_out.to_numpy()
+        flash_result = flash_out.to_numpy()
         
         # 计算相对误差
         def relative_error(a, b):
@@ -179,6 +181,8 @@ def check_attention_correctness(seq_len=128):
         
     except Exception as e:
         print(f"正确性检查过程中出错: {str(e)}")
+        import traceback
+        traceback.print_exc()  # 打印完整的错误堆栈
         return False
     finally:
         # 清理内存
