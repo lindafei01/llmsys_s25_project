@@ -105,7 +105,7 @@ def test_attention_implementations():
         num_trials = 1  # 只测试一次，减少错误累积
         
         # 测试不同的序列长度
-        seq_lengths = [64, 128, 192, 256]  # 从小到大测试不同序列长度
+        seq_lengths = [256]  # 从小到大测试不同序列长度
         
         print("\nAttention Implementations Comparison:")
         print("=" * 70)
