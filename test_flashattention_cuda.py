@@ -102,10 +102,10 @@ def test_attention_implementations():
         batch_size = 32
         num_heads = 8
         head_dim = 64
-        num_trials = 10  # 每个序列长度测试10次
+        num_trials = 1  # 只测试一次，减少错误累积
         
         # 测试不同的序列长度
-        seq_lengths = [256]
+        seq_lengths = [64, 128, 192, 256]  # 从小到大测试不同序列长度
         
         print("\nAttention Implementations Comparison:")
         print("=" * 70)
@@ -160,6 +160,8 @@ def test_attention_implementations():
                     else:
                         q.grad = k.grad = v.grad = None
                     
+                    print(f"Running {name}...")
+                    
                     # 运行实现并计时
                     start_time = time.time()
                     success = impl()
@@ -170,6 +172,9 @@ def test_attention_implementations():
                     if success:
                         trial_results[name]['times'].append(exec_time * 1000)  # 转换为ms
                         trial_results[name]['memories'].append(memory_used / (1024 * 1024))  # 转换为MB
+                        print(f"  Success: {exec_time * 1000:.2f} ms, {memory_used / (1024 * 1024):.2f} MB")
+                    else:
+                        print(f"  Failed!")
                 
                 # 清理内存
                 torch.cuda.empty_cache()
