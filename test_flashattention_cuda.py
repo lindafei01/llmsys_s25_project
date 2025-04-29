@@ -5,9 +5,24 @@ import torch.nn.functional as F
 import minitorch
 from minitorch.cuda_kernel_ops import CudaKernelOps
 import pycuda.driver as cuda
+import atexit
 
 # 初始化 CUDA
 cuda.init()
+
+# 获取 CUDA 设备和创建上下文
+cuda_device = cuda.Device(0)
+cuda_context = cuda_device.make_context()
+
+# 确保程序退出时清理上下文
+def cleanup_cuda():
+    try:
+        if cuda.Context.get_current() is not None:
+            cuda.Context.pop()
+    except Exception as e:
+        print(f"Error during CUDA cleanup: {str(e)}")
+
+atexit.register(cleanup_cuda)
 
 def transpose(a: minitorch.Tensor) -> minitorch.Tensor:
     return a._new(a._tensor.permute(0, 1, 3, 2))
@@ -15,7 +30,9 @@ def transpose(a: minitorch.Tensor) -> minitorch.Tensor:
 def get_gpu_memory_usage():
     """获取当前 GPU 内存使用情况（包括 PyTorch 和 PyCUDA）"""
     try:
+        cuda.Context.push(cuda_context)  # 确保在正确的上下文中
         free_mem, total_mem = cuda.mem_get_info()
+        cuda.Context.pop()  # 操作完成后弹出上下文
         return total_mem - free_mem
     except Exception as e:
         print(f"Error getting GPU memory: {str(e)}")
@@ -24,16 +41,21 @@ def get_gpu_memory_usage():
 def run_flash_attention(q, k, v, grad, head_dim):
     """运行 Flash Attention 实现"""
     try:
+        cuda.Context.push(cuda_context)  # 确保在正确的上下文中
         out = q.flash_attention(k, v, causal=True)
         out.backward(grad)
+        cuda.Context.pop()  # 操作完成后弹出上下文
         return True
     except Exception as e:
         print(f"Flash Attention Error: {str(e)}")
+        if cuda.Context.get_current() is not None:
+            cuda.Context.pop()
         return False
 
 def run_minitorch_attention(q, k, v, grad, head_dim, seq_len, batch_size, num_heads):
     """运行 Minitorch 基础实现"""
     try:
+        cuda.Context.push(cuda_context)  # 确保在正确的上下文中
         scores = (q @ transpose(k)) * (1.0 / np.sqrt(head_dim))
         
         # causal masking
@@ -47,26 +69,25 @@ def run_minitorch_attention(q, k, v, grad, head_dim, seq_len, batch_size, num_he
         attn = minitorch.nn.softmax(scores, dim=-1)
         out = attn @ v
         out.backward(grad)
+        cuda.Context.pop()  # 操作完成后弹出上下文
         return True
     except Exception as e:
         print(f"Minitorch Base Error: {str(e)}")
+        if cuda.Context.get_current() is not None:
+            cuda.Context.pop()
         return False
 
 def run_pytorch_attention(q, k, v, grad, head_dim, seq_len):
     """运行 PyTorch 基础实现"""
     try:
-        # 计算注意力分数
+        # PyTorch 使用自己的 CUDA 上下文管理，不需要显式管理
         scores = torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(head_dim)
         
-        # 创建因果注意力掩码
         mask = torch.triu(torch.ones(seq_len, seq_len, device='cuda'), diagonal=1)
         mask = mask.expand(q.size(0), q.size(1), seq_len, seq_len)
         scores = scores.masked_fill(mask.bool(), float('-inf'))
         
-        # 应用 softmax
         attn = F.softmax(scores, dim=-1)
-        
-        # 计算输出
         out = torch.matmul(attn, v)
         out.backward(grad)
         return True
@@ -75,10 +96,6 @@ def run_pytorch_attention(q, k, v, grad, head_dim, seq_len):
         return False
 
 def test_attention_implementations():
-    # 获取 CUDA 设备
-    cuda_device = cuda.Device(0)
-    cuda_context = cuda_device.make_context()
-    
     try:
         backend = minitorch.TensorBackend(CudaKernelOps)
         
@@ -135,7 +152,6 @@ def test_attention_implementations():
                 
                 for name, impl in implementations.items():
                     # 获取初始内存使用
-                    cuda.Context.synchronize()
                     initial_memory = get_gpu_memory_usage()
                     
                     # 清除梯度
@@ -145,10 +161,8 @@ def test_attention_implementations():
                         q.grad = k.grad = v.grad = None
                     
                     # 运行实现并计时
-                    cuda.Context.synchronize()
                     start_time = time.time()
                     success = impl()
-                    cuda.Context.synchronize()
                     exec_time = time.time() - start_time
                     peak_memory = get_gpu_memory_usage()
                     memory_used = peak_memory - initial_memory
@@ -227,9 +241,8 @@ def test_attention_implementations():
         print(f"Error during testing: {str(e)}")
     
     finally:
-        # 清理 GPU 内存和 CUDA 上下文
+        # 清理 GPU 内存
         torch.cuda.empty_cache()
-        cuda_context.pop()
         
         if results:
             # 打印汇总结果
