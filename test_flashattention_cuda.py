@@ -4,10 +4,19 @@ import torch
 import torch.nn.functional as F
 import minitorch
 from minitorch.cuda_kernel_ops import CudaKernelOps
+import pycuda.driver as cuda
 
-# 添加 transpose 函数定义
 def transpose(a: minitorch.Tensor) -> minitorch.Tensor:
     return a._new(a._tensor.permute(0, 1, 3, 2))
+
+def get_gpu_memory_usage():
+    """获取当前 GPU 内存使用情况（包括 PyTorch 和 PyCUDA）"""
+    try:
+        free_mem, total_mem = cuda.mem_get_info()
+        return total_mem - free_mem
+    except Exception as e:
+        print(f"Error getting GPU memory: {str(e)}")
+        return 0
 
 def run_flash_attention(q, k, v, grad, head_dim):
     """运行 Flash Attention 实现"""
@@ -68,13 +77,15 @@ def test_attention_implementations():
     batch_size = 32
     num_heads = 8
     head_dim = 64
+    num_trials = 10  # 每个序列长度测试10次
     
-    # seq_lengths = [64, 128, 256, 512, 1024, 2048]
-    seq_lengths = [256]
+    # 测试不同的序列长度
+    seq_lengths = [64, 128, 256, 512, 1024, 2048]
     
     print("\nAttention Implementations Comparison:")
     print("=" * 70)
     print(f"Parameters: batch_size={batch_size}, num_heads={num_heads}, head_dim={head_dim}")
+    print(f"Number of trials per sequence length: {num_trials}")
     
     results = []
     
@@ -83,62 +94,82 @@ def test_attention_implementations():
             print(f"\nTesting sequence length: {seq_len}")
             shape = (batch_size, num_heads, seq_len, head_dim)
             
-            # 创建 PyTorch 输入
-            q_torch = torch.randn(*shape, device='cuda', requires_grad=True)
-            k_torch = torch.randn(*shape, device='cuda', requires_grad=True)
-            v_torch = torch.randn(*shape, device='cuda', requires_grad=True)
-            grad_torch = torch.randn(*shape, device='cuda')
-            
-            # 创建 Minitorch 输入
-            q = minitorch.tensor_from_numpy(q_torch.detach().cpu().numpy().astype(np.float32), 
-                                          backend=backend, requires_grad=True)
-            k = minitorch.tensor_from_numpy(k_torch.detach().cpu().numpy().astype(np.float32), 
-                                          backend=backend, requires_grad=True)
-            v = minitorch.tensor_from_numpy(v_torch.detach().cpu().numpy().astype(np.float32), 
-                                          backend=backend, requires_grad=True)
-            grad = minitorch.tensor_from_numpy(grad_torch.cpu().numpy().astype(np.float32), 
-                                             backend=backend)
-            
-            implementations = {
-                'Flash Attention': lambda: run_flash_attention(q, k, v, grad, head_dim),
-                'Minitorch Base': lambda: run_minitorch_attention(q, k, v, grad, head_dim, seq_len, batch_size, num_heads),
-                'PyTorch Base': lambda: run_pytorch_attention(q_torch, k_torch, v_torch, grad_torch, head_dim, seq_len)
+            # 存储多次试验的结果
+            trial_results = {
+                'Flash Attention': {'times': [], 'memories': []},
+                'Minitorch Base': {'times': [], 'memories': []},
+                'PyTorch Base': {'times': [], 'memories': []}
             }
             
-            # 存储每个实现的结果
-            perf_results = {}
+            for trial in range(num_trials):
+                print(f"Running trial {trial + 1}/{num_trials}...")
+                
+                # 创建 PyTorch 输入
+                q_torch = torch.randn(*shape, device='cuda', requires_grad=True)
+                k_torch = torch.randn(*shape, device='cuda', requires_grad=True)
+                v_torch = torch.randn(*shape, device='cuda', requires_grad=True)
+                grad_torch = torch.randn(*shape, device='cuda')
+                
+                # 创建 Minitorch 输入
+                q = minitorch.tensor_from_numpy(q_torch.detach().cpu().numpy().astype(np.float32), 
+                                            backend=backend, requires_grad=True)
+                k = minitorch.tensor_from_numpy(k_torch.detach().cpu().numpy().astype(np.float32), 
+                                            backend=backend, requires_grad=True)
+                v = minitorch.tensor_from_numpy(v_torch.detach().cpu().numpy().astype(np.float32), 
+                                            backend=backend, requires_grad=True)
+                grad = minitorch.tensor_from_numpy(grad_torch.cpu().numpy().astype(np.float32), 
+                                                backend=backend)
+                
+                implementations = {
+                    'Flash Attention': lambda: run_flash_attention(q, k, v, grad, head_dim),
+                    'Minitorch Base': lambda: run_minitorch_attention(q, k, v, grad, head_dim, seq_len, batch_size, num_heads),
+                    'PyTorch Base': lambda: run_pytorch_attention(q_torch, k_torch, v_torch, grad_torch, head_dim, seq_len)
+                }
+                
+                for name, impl in implementations.items():
+                    # 获取初始内存使用
+                    cuda.Context.synchronize()
+                    initial_memory = get_gpu_memory_usage()
+                    
+                    # 清除梯度
+                    if name == 'PyTorch Base':
+                        q_torch.grad = k_torch.grad = v_torch.grad = None
+                    else:
+                        q.grad = k.grad = v.grad = None
+                    
+                    # 运行实现并计时
+                    cuda.Context.synchronize()
+                    start_time = time.time()
+                    success = impl()
+                    cuda.Context.synchronize()
+                    exec_time = time.time() - start_time
+                    peak_memory = get_gpu_memory_usage()
+                    memory_used = peak_memory - initial_memory
+                    
+                    if success:
+                        trial_results[name]['times'].append(exec_time * 1000)  # 转换为ms
+                        trial_results[name]['memories'].append(memory_used / (1024 * 1024))  # 转换为MB
+                
+                # 清理内存
+                torch.cuda.empty_cache()
             
-            for name, impl in implementations.items():
-                # 重置 GPU 内存统计
-                torch.cuda.reset_peak_memory_stats()
-                torch.cuda.empty_cache()  # 清空 GPU 缓存
-                initial_memory = torch.cuda.memory_allocated()
-                
-                # 清除梯度
-                if name == 'PyTorch Base':
-                    q_torch.grad = k_torch.grad = v_torch.grad = None
-                else:
-                    q.grad = k.grad = v.grad = None
-                
-                # 运行实现并计时
-                torch.cuda.synchronize()
-                start_time = time.time()
-                success = impl()
-                torch.cuda.synchronize()
-                exec_time = time.time() - start_time
-                memory_used = torch.cuda.max_memory_allocated() - initial_memory
-                
-                if success:
+            # 计算平均性能和标准差
+            perf_results = {}
+            for name, data in trial_results.items():
+                if data['times']:  # 如果有成功的试验
                     perf_results[name] = {
-                        'time': exec_time * 1000,  # 转换为ms
-                        'memory': memory_used / (1024 * 1024)  # 转换为MB
+                        'time': np.mean(data['times']),
+                        'time_std': np.std(data['times']),
+                        'memory': np.mean(data['memories']),
+                        'memory_std': np.std(data['memories'])
                     }
                 else:
                     perf_results[name] = {
                         'time': float('inf'),
-                        'memory': float('inf')
+                        'time_std': 0,
+                        'memory': float('inf'),
+                        'memory_std': 0
                     }
-                    print(f"{name} failed for sequence length {seq_len}")
             
             # 如果所有实现都失败了，跳过这个序列长度
             if all(v['time'] == float('inf') for v in perf_results.values()):
@@ -152,7 +183,9 @@ def test_attention_implementations():
             results.append({
                 'seq_len': seq_len,
                 **{f"{k}_time": v['time'] for k, v in perf_results.items()},
+                **{f"{k}_time_std": v['time_std'] for k, v in perf_results.items()},
                 **{f"{k}_memory": v['memory'] for k, v in perf_results.items()},
+                **{f"{k}_memory_std": v['memory_std'] for k, v in perf_results.items()},
                 'speedup_vs_minitorch': perf_results['Minitorch Base']['time'] / flash_time if flash_time != float('inf') else 0,
                 'speedup_vs_pytorch': perf_results['PyTorch Base']['time'] / flash_time if flash_time != float('inf') else 0,
                 'memory_saved_vs_minitorch': perf_results['Minitorch Base']['memory'] - flash_memory,
@@ -160,19 +193,19 @@ def test_attention_implementations():
             })
             
             # 打印当前结果
-            print("\nExecution Time:")
+            print("\nAverage Execution Time (± std):")
             for name, res in perf_results.items():
                 if res['time'] == float('inf'):
                     print(f"{name:15}: Failed")
                 else:
-                    print(f"{name:15}: {res['time']:.2f} ms")
+                    print(f"{name:15}: {res['time']:.2f} ± {res['time_std']:.2f} ms")
             
-            print("\nMemory Usage:")
+            print("\nAverage Memory Usage (± std):")
             for name, res in perf_results.items():
                 if res['memory'] == float('inf'):
                     print(f"{name:15}: Failed")
                 else:
-                    print(f"{name:15}: {res['memory']:.2f} MB")
+                    print(f"{name:15}: {res['memory']:.2f} ± {res['memory_std']:.2f} MB")
             
             if flash_time != float('inf'):
                 print("\nSpeedup Ratios:")
@@ -182,9 +215,6 @@ def test_attention_implementations():
                 print("\nMemory Savings:")
                 print(f"vs Minitorch Base: {(perf_results['Minitorch Base']['memory'] - flash_memory):.2f} MB")
                 print(f"vs PyTorch Base: {(perf_results['PyTorch Base']['memory'] - flash_memory):.2f} MB")
-            
-            # 确保清理 GPU 内存
-            torch.cuda.empty_cache()
     
     except Exception as e:
         print(f"Error during testing: {str(e)}")
@@ -196,7 +226,7 @@ def test_attention_implementations():
         if results:
             # 打印汇总结果
             print("\n" + "=" * 120)
-            print("Summary of Results:")
+            print("Summary of Results (averaged over trials):")
             print("=" * 120)
             headers = ["Seq Len", "Flash (ms)", "MT Base (ms)", "PT Base (ms)", 
                       "vs MT", "vs PT", "Flash Mem", "MT Mem", "PT Mem"]
