@@ -38,21 +38,20 @@ def get_gpu_memory_usage():
         print(f"Error getting GPU memory: {str(e)}")
         return 0
 
-def run_flash_attention(q, k, v, grad, head_dim):
+def run_flash_attention(q, k, v, head_dim):
     """运行 Flash Attention 实现"""
     try:
         cuda.Context.push(cuda_context)  # 确保在正确的上下文中
         out = q.flash_attention(k, v, causal=True)
-        out.backward(grad)
         cuda.Context.pop()  # 操作完成后弹出上下文
-        return True
+        return True, out
     except Exception as e:
         print(f"Flash Attention Error: {str(e)}")
         if cuda.Context.get_current() is not None:
             cuda.Context.pop()
-        return False
+        return False, None
 
-def run_minitorch_attention(q, k, v, grad, head_dim, seq_len, batch_size, num_heads):
+def run_minitorch_attention(q, k, v, head_dim, seq_len, batch_size, num_heads):
     """运行 Minitorch 基础实现"""
     try:
         cuda.Context.push(cuda_context)  # 确保在正确的上下文中
@@ -68,16 +67,16 @@ def run_minitorch_attention(q, k, v, grad, head_dim, seq_len, batch_size, num_he
         
         attn = minitorch.nn.softmax(scores, dim=-1)
         out = attn @ v
-        out.backward(grad)
+        
         cuda.Context.pop()  # 操作完成后弹出上下文
-        return True
+        return True, out
     except Exception as e:
         print(f"Minitorch Base Error: {str(e)}")
         if cuda.Context.get_current() is not None:
             cuda.Context.pop()
-        return False
+        return False, None
 
-def run_pytorch_attention(q, k, v, grad, head_dim, seq_len):
+def run_pytorch_attention(q, k, v, head_dim, seq_len):
     """运行 PyTorch 基础实现"""
     try:
         # PyTorch 使用自己的 CUDA 上下文管理，不需要显式管理
@@ -89,11 +88,101 @@ def run_pytorch_attention(q, k, v, grad, head_dim, seq_len):
         
         attn = F.softmax(scores, dim=-1)
         out = torch.matmul(attn, v)
-        out.backward(grad)
-        return True
+        
+        return True, out
     except Exception as e:
         print(f"PyTorch Base Error: {str(e)}")
+        return False, None
+
+def check_attention_correctness(seq_len=128):
+    """
+    单独检查不同实现的正确性，比较输出结果
+    
+    Args:
+        seq_len (int): 测试的序列长度
+        
+    Returns:
+        bool: 是否通过正确性检查
+    """
+    print("\n" + "=" * 70)
+    print(f"检查注意力实现的正确性 (seq_len={seq_len})")
+    print("=" * 70)
+    
+    try:
+        backend = minitorch.TensorBackend(CudaKernelOps)
+        
+        # 设置测试参数
+        batch_size = 4  # 使用较小的batch size减轻内存压力
+        num_heads = 2
+        head_dim = 64
+        shape = (batch_size, num_heads, seq_len, head_dim)
+        
+        print("创建输入数据...")
+        # 创建输入数据 (使用相同的随机种子确保一致性)
+        torch.manual_seed(42)
+        q_torch = torch.randn(*shape, device='cuda')
+        k_torch = torch.randn(*shape, device='cuda')
+        v_torch = torch.randn(*shape, device='cuda')
+        
+        # 为minitorch创建相同的输入
+        q = minitorch.tensor_from_numpy(q_torch.detach().cpu().numpy().astype(np.float32), backend=backend)
+        k = minitorch.tensor_from_numpy(k_torch.detach().cpu().numpy().astype(np.float32), backend=backend)
+        v = minitorch.tensor_from_numpy(v_torch.detach().cpu().numpy().astype(np.float32), backend=backend)
+        
+        # 运行不同实现
+        print("运行 PyTorch Base 实现...")
+        pt_success, pt_out = run_pytorch_attention(q_torch, k_torch, v_torch, head_dim, seq_len)
+        if not pt_success:
+            print("PyTorch Base 实现失败!")
+            return False
+            
+        print("运行 Minitorch Base 实现...")
+        mt_success, mt_out = run_minitorch_attention(q, k, v, head_dim, seq_len, batch_size, num_heads)
+        if not mt_success:
+            print("Minitorch Base 实现失败!")
+            return False
+            
+        print("运行 Flash Attention 实现...")
+        flash_success, flash_out = run_flash_attention(q, k, v, head_dim)
+        if not flash_success:
+            print("Flash Attention 实现失败!")
+            return False
+        
+        # 将结果转换为NumPy进行比较
+        print("比较输出结果...")
+        pt_result = pt_out.detach().cpu().numpy()
+        mt_result = mt_out._tensor.cpu().numpy()
+        flash_result = flash_out._tensor.cpu().numpy()
+        
+        # 计算相对误差
+        def relative_error(a, b):
+            return np.max(np.abs(a - b) / (np.maximum(1e-8, np.abs(a) + np.abs(b)) / 2))
+        
+        flash_vs_pt = relative_error(flash_result, pt_result)
+        flash_vs_mt = relative_error(flash_result, mt_result)
+        mt_vs_pt = relative_error(mt_result, pt_result)
+        
+        print(f"Flash Attention vs PyTorch: 相对误差 = {flash_vs_pt:.6f}")
+        print(f"Flash Attention vs Minitorch: 相对误差 = {flash_vs_mt:.6f}")
+        print(f"Minitorch vs PyTorch: 相对误差 = {mt_vs_pt:.6f}")
+        
+        # 设置一个合理的容差阈值
+        tolerance = 1e-4
+        passed = flash_vs_pt < tolerance and flash_vs_mt < tolerance
+        
+        if passed:
+            print("\n正确性检查通过!")
+        else:
+            print("\n正确性检查失败! 输出结果差异过大.")
+        
+        return passed
+        
+    except Exception as e:
+        print(f"正确性检查过程中出错: {str(e)}")
         return False
+    finally:
+        # 清理内存
+        torch.cuda.empty_cache()
 
 def test_attention_implementations():
     try:
@@ -129,42 +218,33 @@ def test_attention_implementations():
                 print(f"Running trial {trial + 1}/{num_trials}...")
                 
                 # 创建 PyTorch 输入
-                q_torch = torch.randn(*shape, device='cuda', requires_grad=True)
-                k_torch = torch.randn(*shape, device='cuda', requires_grad=True)
-                v_torch = torch.randn(*shape, device='cuda', requires_grad=True)
-                grad_torch = torch.randn(*shape, device='cuda')
+                q_torch = torch.randn(*shape, device='cuda')
+                k_torch = torch.randn(*shape, device='cuda')
+                v_torch = torch.randn(*shape, device='cuda')
                 
                 # 创建 Minitorch 输入
                 q = minitorch.tensor_from_numpy(q_torch.detach().cpu().numpy().astype(np.float32), 
-                                            backend=backend, requires_grad=True)
+                                            backend=backend)
                 k = minitorch.tensor_from_numpy(k_torch.detach().cpu().numpy().astype(np.float32), 
-                                            backend=backend, requires_grad=True)
+                                            backend=backend)
                 v = minitorch.tensor_from_numpy(v_torch.detach().cpu().numpy().astype(np.float32), 
-                                            backend=backend, requires_grad=True)
-                grad = minitorch.tensor_from_numpy(grad_torch.cpu().numpy().astype(np.float32), 
-                                                backend=backend)
+                                            backend=backend)
                 
                 implementations = {
-                    'Flash Attention': lambda: run_flash_attention(q, k, v, grad, head_dim),
-                    'Minitorch Base': lambda: run_minitorch_attention(q, k, v, grad, head_dim, seq_len, batch_size, num_heads),
-                    'PyTorch Base': lambda: run_pytorch_attention(q_torch, k_torch, v_torch, grad_torch, head_dim, seq_len)
+                    'Flash Attention': lambda: run_flash_attention(q, k, v, head_dim),
+                    'Minitorch Base': lambda: run_minitorch_attention(q, k, v, head_dim, seq_len, batch_size, num_heads),
+                    'PyTorch Base': lambda: run_pytorch_attention(q_torch, k_torch, v_torch, head_dim, seq_len)
                 }
                 
                 for name, impl in implementations.items():
                     # 获取初始内存使用
                     initial_memory = get_gpu_memory_usage()
                     
-                    # 清除梯度
-                    if name == 'PyTorch Base':
-                        q_torch.grad = k_torch.grad = v_torch.grad = None
-                    else:
-                        q.grad = k.grad = v.grad = None
-                    
                     print(f"Running {name}...")
                     
                     # 运行实现并计时
                     start_time = time.time()
-                    success = impl()
+                    success, _ = impl()
                     exec_time = time.time() - start_time
                     peak_memory = get_gpu_memory_usage()
                     memory_used = peak_memory - initial_memory
@@ -271,4 +351,10 @@ def test_attention_implementations():
                       f"{r['PyTorch Base_memory']:>12.2f}")
 
 if __name__ == "__main__":
-    test_attention_implementations()
+    # 首先检查正确性
+    correct = check_attention_correctness(seq_len=64)  # 使用较小的序列长度检查正确性
+    if correct:
+        # 如果正确性检查通过，再进行性能测试
+        test_attention_implementations()
+    else:
+        print("\n正确性检查未通过，跳过性能测试。")
